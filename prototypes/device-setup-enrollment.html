@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shared Lists enrollment prototype</title>
+  <style>
+    /* THROWAWAY PROTOTYPE: three enrollment variants, switchable with ?variant=A|B|C. */
+    :root {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #17201b;
+      background: #e9efeb;
+      --green: #28724f;
+      --green-dark: #173a2b;
+      --green-soft: #dcefe4;
+      --ink: #17201b;
+      --muted: #68766d;
+      --line: #d8e1db;
+      --paper: #fff;
+      --warning: #9a5f00;
+      --danger: #a53e39;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    button { cursor: pointer; font: inherit; }
+    .app { min-height: 100vh; padding-bottom: 96px; }
+    .prototype-note { background: #fff4cb; border-bottom: 1px solid #ead37b; color: #69571b; font-size: 12px; padding: 7px 16px; text-align: center; }
+    .scenario-bar {
+      align-items: center; background: #f7faf8; border-bottom: 1px solid var(--line); display: flex; gap: 6px;
+      overflow-x: auto; padding: 9px 14px;
+    }
+    .scenario-bar strong { color: var(--muted); flex: 0 0 auto; font-size: 11px; letter-spacing: .08em; margin-right: 4px; text-transform: uppercase; }
+    .scenario {
+      background: white; border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+      flex: 0 0 auto; font-size: 12px; padding: 7px 10px;
+    }
+    .scenario.active { background: var(--green-dark); border-color: var(--green-dark); color: white; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+    .primary { background: var(--green); border: 0; border-radius: 10px; color: white; font-weight: 750; padding: 11px 18px; }
+    .secondary { background: white; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); font-weight: 650; padding: 10px 16px; }
+    .danger { color: var(--danger); }
+    .eyebrow { color: var(--green); font-size: 11px; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+    .muted { color: var(--muted); }
+    .filename { background: #f2f6f3; border: 1px solid var(--line); border-radius: 10px; font: 12px/1.5 ui-monospace, monospace; margin: 18px 0; padding: 12px; overflow-wrap: anywhere; }
+    .fingerprint { color: var(--muted); display: block; font-size: 11px; margin-top: 4px; }
+    .spinner { animation: spin 1s linear infinite; border: 3px solid #d9e5de; border-radius: 50%; border-top-color: var(--green); height: 28px; width: 28px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* A: modal over the product */
+    .a-shell { background: #edf2ee; min-height: calc(100vh - 74px); position: relative; }
+    .fake-app { display: grid; filter: blur(1px); grid-template-columns: 240px 1fr; min-height: calc(100vh - 74px); opacity: .58; }
+    .fake-side { background: var(--green-dark); color: white; padding: 30px 24px; }
+    .fake-side h2 { margin: 0 0 30px; }
+    .fake-list { background: #2e5644; border-radius: 10px; margin: 8px 0; padding: 12px; }
+    .fake-main { background: white; padding: 56px 8vw; }
+    .fake-line { background: #e9efeb; border-radius: 8px; height: 48px; margin: 10px 0; max-width: 720px; }
+    .shade { background: #1018138f; inset: 0; position: absolute; }
+    .dialog {
+      background: white; border-radius: 20px; box-shadow: 0 28px 80px #0004; left: 50%; max-width: 470px;
+      padding: 30px; position: absolute; top: 50%; transform: translate(-50%, -50%); width: calc(100% - 32px);
+    }
+    .dialog-icon { align-items: center; background: var(--green-soft); border-radius: 14px; color: var(--green); display: flex; font-size: 24px; height: 48px; justify-content: center; width: 48px; }
+    .dialog h1 { font-size: 27px; letter-spacing: -.03em; margin: 18px 0 10px; }
+    .dialog p { color: var(--muted); line-height: 1.55; margin: 0; }
+
+    /* B: dedicated guided setup */
+    .b-shell { background: #f5f0e8; min-height: calc(100vh - 74px); padding: 36px 18px; }
+    .b-wrap { margin: auto; max-width: 900px; }
+    .b-brand { font-family: Georgia, serif; font-size: 25px; font-weight: 700; }
+    .b-layout { align-items: start; display: grid; gap: 42px; grid-template-columns: 250px 1fr; margin-top: 60px; }
+    .steps { list-style: none; margin: 0; padding: 0; }
+    .step { border-left: 2px solid #d8cdbd; color: #8a7c69; padding: 5px 0 28px 20px; }
+    .step.active { border-color: var(--green); color: var(--ink); font-weight: 750; }
+    .step.done { border-color: var(--green); color: var(--green); }
+    .b-card { background: white; border: 1px solid #e3d8ca; border-radius: 24px; box-shadow: 0 18px 60px #6e5a3814; padding: clamp(26px, 5vw, 48px); }
+    .b-card h1 { font-family: Georgia, serif; font-size: clamp(32px, 5vw, 46px); margin: 10px 0 14px; }
+    .b-card p { color: #746956; font-size: 17px; line-height: 1.6; }
+    .handoff { align-items: start; background: #f8f3eb; border-radius: 16px; display: grid; gap: 14px; grid-template-columns: auto 1fr; margin-top: 22px; padding: 18px; }
+    .handoff-number { align-items: center; background: var(--green-dark); border-radius: 50%; color: white; display: flex; font-weight: 800; height: 30px; justify-content: center; width: 30px; }
+
+    /* C: compact setup rail */
+    .c-shell { background: #edf3f7; display: grid; grid-template-columns: minmax(0, 1fr) 390px; min-height: calc(100vh - 74px); }
+    .c-content { padding: 50px 7vw; }
+    .c-content h1 { font-size: 42px; margin: 0 0 30px; }
+    .c-item { align-items: center; background: white; border: 1px solid #d9e2e8; border-radius: 14px; display: flex; gap: 14px; margin: 10px 0; padding: 15px; }
+    .c-rail { background: #142d40; color: white; padding: 38px 28px; }
+    .c-rail .eyebrow { color: #8bd9b5; }
+    .c-rail h2 { font-size: 30px; letter-spacing: -.03em; margin: 10px 0 12px; }
+    .c-rail p { color: #bfd0dc; line-height: 1.55; }
+    .c-rail .filename { background: #203e52; border-color: #36566b; color: white; }
+    .c-rail .fingerprint { color: #9fb5c3; }
+    .c-rail .secondary { background: transparent; border-color: #5e7889; color: white; }
+    .status-dot { background: #e6a82f; border-radius: 50%; display: inline-block; height: 9px; margin-right: 7px; width: 9px; }
+
+    .switcher {
+      align-items: center; background: #111814; border: 1px solid #405047; border-radius: 999px; bottom: 20px;
+      box-shadow: 0 12px 38px #0005; color: white; display: flex; gap: 8px; left: 50%; padding: 7px;
+      position: fixed; transform: translateX(-50%); z-index: 30;
+    }
+    .switcher button { background: #26332c; border: 0; border-radius: 999px; color: white; height: 38px; width: 38px; }
+    .switch-label { font-size: 13px; font-weight: 750; min-width: 190px; text-align: center; }
+    .state {
+      background: #111814; border-radius: 10px; bottom: 75px; color: #cfe0d6; font: 11px/1.45 ui-monospace, monospace;
+      max-width: min(420px, calc(100vw - 24px)); opacity: .88; padding: 10px; position: fixed; right: 12px; z-index: 29;
+    }
+    @media (max-width: 760px) {
+      .fake-app { display: block; }
+      .fake-side { display: none; }
+      .b-layout { display: block; margin-top: 28px; }
+      .steps { display: flex; gap: 4px; margin-bottom: 18px; }
+      .step { border-bottom: 2px solid #d8cdbd; border-left: 0; flex: 1; font-size: 0; padding: 0 0 8px; }
+      .step.active, .step.done { border-bottom-color: var(--green); }
+      .c-shell { display: block; }
+      .c-content { display: none; }
+      .c-rail { min-height: calc(100vh - 74px); padding: 42px 24px; }
+      .state { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="prototype-note">Throwaway enrollment prototype — no keys or files are created</div>
+  <nav class="scenario-bar">
+    <strong>Scenario</strong>
+    <button class="scenario" data-stage="missing">No key</button>
+    <button class="scenario" data-stage="export">Export</button>
+    <button class="scenario" data-stage="failed">Export failed</button>
+    <button class="scenario" data-stage="waiting">Not enrolled</button>
+    <button class="scenario" data-stage="vault-error">Vault error</button>
+    <button class="scenario" data-stage="ready">Connected</button>
+  </nav>
+  <main id="root" class="app"></main>
+  <pre id="state" class="state"></pre>
+  <div class="switcher">
+    <button id="prev" aria-label="Previous variant">←</button>
+    <div id="variant-label" class="switch-label"></div>
+    <button id="next" aria-label="Next variant">→</button>
+  </div>
+
+  <script>
+    const variants = [
+      { key: "A", name: "Focused dialog" },
+      { key: "B", name: "Guided handoff" },
+      { key: "C", name: "Setup side rail" }
+    ];
+    const stages = ["missing", "export", "failed", "waiting", "vault-error", "ready"];
+    let stage = new URLSearchParams(location.search).get("stage") || "missing";
+    const fileName = "google-pixel-9-a3f92c1d.pem";
+    const fingerprint = "A3:F9:2C:1D:7B:81:64:0E…";
+
+    const copy = {
+      missing: {
+        eyebrow: "Setup required", title: "This device is not set up",
+        body: "Shared Lists needs a private key stored securely on this device. The private key never leaves this device.",
+        primary: "OK — create device key", next: "export", icon: "◇"
+      },
+      export: {
+        eyebrow: "Key created", title: "Save the enrollment file",
+        body: "Give this public-key file to the server administrator. It is safe to copy; your private key remains protected in this device's vault.",
+        primary: "Save public key", next: "waiting", secondary: "Simulate export failure", icon: "↓"
+      },
+      failed: {
+        eyebrow: "Export not completed", title: "The public key was not saved",
+        body: "Your private key is safe. Choose a destination and try saving the same public key again.",
+        primary: "Try again", next: "export", icon: "!"
+      },
+      waiting: {
+        eyebrow: "Device not enrolled", title: "Ask the administrator to add this device",
+        body: "The server does not recognize this device yet. The administrator must copy the public-key file to the server and restart it.",
+        primary: "Try connecting again", next: "ready", secondary: "Reset device setup", secondaryNext: "missing", destructive: true, icon: "⌛"
+      },
+      "vault-error": {
+        eyebrow: "Key unavailable", title: "The device key could not be read",
+        body: "Shared Lists will not replace this key. Unlock the device if needed, then retry. If the error continues, contact the administrator.",
+        primary: "Retry", next: "ready", secondary: "Close app", secondaryNext: "vault-error", icon: "!"
+      },
+      ready: {
+        eyebrow: "Connected", title: "This device is enrolled",
+        body: "Authentication succeeded. Shared lists can now synchronize while the app remains in the foreground.",
+        primary: "Open shared lists", next: "ready", icon: "✓"
+      }
+    };
+
+    function variant() {
+      const key = new URLSearchParams(location.search).get("variant")?.toUpperCase();
+      return variants.find((candidate) => candidate.key === key) || variants[0];
+    }
+
+    function artifact() {
+      return `<div class="filename">${fileName}<span class="fingerprint">Public-key fingerprint ${fingerprint}</span></div>`;
+    }
+
+    function actions(data) {
+      return `<div class="button-row">
+        <button class="primary" data-next="${data.next}">${data.primary}</button>
+        ${data.secondary ? `<button class="secondary ${data.destructive ? "danger" : ""}" ${data.destructive ? "data-reset" : `data-next="${data.secondaryNext || "failed"}"`}>${data.secondary}</button>` : ""}
+      </div>`;
+    }
+
+    function fakeApp() {
+      return `<div class="fake-app"><aside class="fake-side"><h2>Shared Lists</h2><div class="fake-list">Groceries</div><div class="fake-list">House</div></aside><section class="fake-main"><h1>Groceries</h1><div class="fake-line"></div><div class="fake-line"></div><div class="fake-line"></div></section></div>`;
+    }
+
+    function variantA(data) {
+      return `<section class="a-shell">${fakeApp()}<div class="shade"></div><article class="dialog">
+        <div class="dialog-icon">${data.icon}</div><div class="eyebrow" style="margin-top:18px">${data.eyebrow}</div>
+        <h1>${data.title}</h1><p>${data.body}</p>
+        ${["export", "failed", "waiting"].includes(stage) ? artifact() : ""}
+        ${actions(data)}
+      </article></section>`;
+    }
+
+    function stepState(index) {
+      const current = stage === "missing" ? 0 : ["export", "failed"].includes(stage) ? 1 : stage === "waiting" ? 2 : 3;
+      return index < current ? "done" : index === current ? "active" : "";
+    }
+
+    function variantB(data) {
+      return `<section class="b-shell"><div class="b-wrap"><div class="b-brand">Shared Lists</div><div class="b-layout">
+        <ol class="steps"><li class="step ${stepState(0)}">1. Create device key</li><li class="step ${stepState(1)}">2. Save public key</li><li class="step ${stepState(2)}">3. Administrator enrolls device</li><li class="step ${stepState(3)}">4. Connect</li></ol>
+        <article class="b-card"><div class="eyebrow">${data.eyebrow}</div><h1>${data.title}</h1><p>${data.body}</p>
+          ${["export", "failed", "waiting"].includes(stage) ? artifact() : ""}
+          ${stage === "waiting" ? `<div class="handoff"><div class="handoff-number">1</div><div><strong>Hand this file to the administrator</strong><div class="muted">They copy it into the server's authorized-key directory.</div></div><div class="handoff-number">2</div><div><strong>Wait for the server restart</strong><div class="muted">Then return here and try connecting again.</div></div></div>` : ""}
+          ${actions(data)}
+        </article>
+      </div></div></section>`;
+    }
+
+    function variantC(data) {
+      return `<section class="c-shell">
+        <section class="c-content"><div class="eyebrow">Shared Lists</div><h1>Groceries</h1><div class="c-item">○ Oat milk</div><div class="c-item">✓ Bananas</div><div class="c-item">○ Coffee beans</div></section>
+        <aside class="c-rail"><div class="eyebrow"><span class="status-dot"></span>${data.eyebrow}</div><h2>${data.title}</h2><p>${data.body}</p>
+          ${["export", "failed", "waiting"].includes(stage) ? artifact() : ""}
+          ${actions(data)}
+        </aside>
+      </section>`;
+    }
+
+    function render() {
+      const selected = variant();
+      const data = copy[stage] || copy.missing;
+      document.querySelector("#root").innerHTML = selected.key === "A" ? variantA(data) : selected.key === "B" ? variantB(data) : variantC(data);
+      document.querySelector("#variant-label").textContent = `${selected.key} · ${selected.name}`;
+      document.querySelector("#state").textContent = JSON.stringify({
+        variant: selected.key,
+        state: stage,
+        privateKey: stage === "missing" ? "absent" : stage === "vault-error" ? "unreadable" : "present in platform vault",
+        publicKeyFile: ["export", "failed", "waiting"].includes(stage) ? fileName : null,
+        serverEnrollment: stage === "ready" ? "authorized" : "not authorized"
+      }, null, 2);
+      document.querySelectorAll(".scenario").forEach((button) => button.classList.toggle("active", button.dataset.stage === stage));
+      document.querySelectorAll("[data-next]").forEach((button) => button.addEventListener("click", () => {
+        stage = button.dataset.next;
+        render();
+      }));
+      document.querySelector("[data-reset]")?.addEventListener("click", () => {
+        if (confirm("Delete this device key? Any old public-key file will stop working and the administrator must install a newly exported file.")) {
+          stage = "missing";
+          render();
+        }
+      });
+    }
+
+    function switchVariant(offset) {
+      const selected = variant();
+      const index = variants.findIndex((candidate) => candidate.key === selected.key);
+      const next = variants[(index + offset + variants.length) % variants.length];
+      const url = new URL(location.href);
+      url.searchParams.set("variant", next.key);
+      history.replaceState({}, "", url);
+      render();
+    }
+
+    document.querySelectorAll(".scenario").forEach((button) => button.addEventListener("click", () => {
+      stage = button.dataset.stage;
+      render();
+    }));
+    document.querySelector("#prev").addEventListener("click", () => switchVariant(-1));
+    document.querySelector("#next").addEventListener("click", () => switchVariant(1));
+    window.addEventListener("keydown", (event) => {
+      if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
+      if (event.key === "ArrowLeft") switchVariant(-1);
+      if (event.key === "ArrowRight") switchVariant(1);
+    });
+    render();
+  </script>
+</body>
+</html>

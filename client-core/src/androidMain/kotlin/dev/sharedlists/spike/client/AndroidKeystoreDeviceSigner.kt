@@ -1,0 +1,81 @@
+package dev.sharedlists.spike.client
+
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.Signature
+import java.security.spec.ECGenParameterSpec
+
+class AndroidKeystoreDeviceSigner private constructor(
+    private val alias: String,
+    private val privateKey: PrivateKey,
+    override val publicKeySpkiDer: ByteArray,
+    private val strongBoxBacked: Boolean,
+) : DeviceSigner {
+    override val custody: String =
+        if (strongBoxBacked) "Android Keystore StrongBox" else "Android Keystore"
+
+    override fun signEs256(signingInput: ByteArray): ByteArray {
+        val der = Signature.getInstance("SHA256withECDSA").run {
+            initSign(privateKey)
+            update(signingInput)
+            sign()
+        }
+        return EcdsaDer.toJoseP256(der)
+    }
+
+    fun delete() {
+        KeyStore.getInstance(PROVIDER).apply { load(null) }.deleteEntry(alias)
+    }
+
+    companion object {
+        private const val PROVIDER = "AndroidKeyStore"
+
+        fun openOrCreate(alias: String): AndroidKeystoreDeviceSigner {
+            val keyStore = KeyStore.getInstance(PROVIDER).apply { load(null) }
+            keyStore.getEntry(alias, null)?.let { entry ->
+                val privateEntry = entry as? KeyStore.PrivateKeyEntry
+                    ?: error("$alias is not a private-key entry")
+                require(privateEntry.privateKey.encoded == null) {
+                    "refusing exportable private key; expected Android Keystore custody"
+                }
+                return AndroidKeystoreDeviceSigner(
+                    alias,
+                    privateEntry.privateKey,
+                    privateEntry.certificate.publicKey.encoded,
+                    strongBoxBacked = false,
+                )
+            }
+
+            val strongBox = runCatching { generate(alias, strongBox = true) }
+            val pair = strongBox.getOrElse { failure ->
+                if (failure !is StrongBoxUnavailableException) throw failure
+                generate(alias, strongBox = false)
+            }
+            require(pair.private.encoded == null) {
+                "refusing exportable private key; expected Android Keystore custody"
+            }
+            return AndroidKeystoreDeviceSigner(
+                alias,
+                pair.private,
+                pair.public.encoded,
+                strongBoxBacked = strongBox.isSuccess,
+            )
+        }
+
+        private fun generate(alias: String, strongBox: Boolean) =
+            KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, PROVIDER).run {
+                val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setUserAuthenticationRequired(false)
+                    .setIsStrongBoxBacked(strongBox)
+                    .build()
+                initialize(spec)
+                generateKeyPair()
+            }
+    }
+}

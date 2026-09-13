@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package sharedlists.spike.v1;
+
+option java_multiple_files = true;
+option java_package = "dev.sharedlists.spike.protocol";
+option java_outer_classname = "SharedListsSpikeProto";
+
+service SharedListsSpike {
+  rpc Challenge(ChallengeRequest) returns (ChallengeResponse);
+  rpc Sync(stream SyncRequest) returns (stream SyncResponse);
+}
+
+message ChallengeRequest {
+  string kid = 1;
+}
+
+message ChallengeResponse {
+  bytes nonce = 1;
+  int64 issued_at_epoch_seconds = 2;
+  int64 expires_at_epoch_seconds = 3;
+  string audience = 4;
+}
+
+message SyncRequest {
+  string payload = 1;
+}
+
+message SyncResponse {
+  string payload = 1;
+  string authenticated_kid = 2;
+}

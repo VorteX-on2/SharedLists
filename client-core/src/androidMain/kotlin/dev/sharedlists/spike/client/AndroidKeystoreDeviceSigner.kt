@@ -1,9 +1,12 @@
 package dev.sharedlists.spike.client
 
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import android.os.Build
 import java.security.KeyPairGenerator
+import java.security.KeyFactory
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.Signature
@@ -13,11 +16,8 @@ class AndroidKeystoreDeviceSigner private constructor(
     private val alias: String,
     private val privateKey: PrivateKey,
     override val publicKeySpkiDer: ByteArray,
-    private val strongBoxBacked: Boolean,
+    override val custody: String,
 ) : DeviceSigner {
-    override val custody: String =
-        if (strongBoxBacked) "Android Keystore StrongBox" else "Android Keystore"
-
     override fun signEs256(signingInput: ByteArray): ByteArray {
         val der = Signature.getInstance("SHA256withECDSA").run {
             initSign(privateKey)
@@ -46,7 +46,7 @@ class AndroidKeystoreDeviceSigner private constructor(
                     alias,
                     privateEntry.privateKey,
                     privateEntry.certificate.publicKey.encoded,
-                    strongBoxBacked = false,
+                    custody(privateEntry.privateKey),
                 )
             }
 
@@ -62,8 +62,27 @@ class AndroidKeystoreDeviceSigner private constructor(
                 alias,
                 pair.private,
                 pair.public.encoded,
-                strongBoxBacked = strongBox.isSuccess,
+                custody(pair.private),
             )
+        }
+
+        @Suppress("DEPRECATION")
+        private fun custody(privateKey: PrivateKey): String {
+            val keyInfo = KeyFactory.getInstance(privateKey.algorithm, PROVIDER)
+                .getKeySpec(privateKey, KeyInfo::class.java)
+            val level = if (Build.VERSION.SDK_INT >= 31) {
+                when (keyInfo.securityLevel) {
+                    KeyProperties.SECURITY_LEVEL_STRONGBOX -> "StrongBox"
+                    KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "TEE"
+                    KeyProperties.SECURITY_LEVEL_SOFTWARE -> "software"
+                    else -> "unknown"
+                }
+            } else if (keyInfo.isInsideSecureHardware) {
+                "secure hardware"
+            } else {
+                "software"
+            }
+            return "Android Keystore ($level)"
         }
 
         private fun generate(alias: String, strongBox: Boolean) =

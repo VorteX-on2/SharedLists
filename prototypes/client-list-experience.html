@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shared Lists client experience prototype</title>
+  <style>
+    /* THROWAWAY PROTOTYPE: three UI variants, switchable with ?variant=A|B|C. */
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --ink: #17201b;
+      --muted: #66736b;
+      --line: #dbe3de;
+      --surface: #ffffff;
+      --soft: #f2f6f3;
+      --accent: #2f7652;
+      --accent-soft: #dcefe4;
+      --danger: #a63c3c;
+      background: #edf2ee;
+      color: var(--ink);
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    .app { min-height: 100vh; padding-bottom: 96px; }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .muted { color: var(--muted); }
+    .count { color: var(--muted); font-size: 13px; }
+    .empty { color: var(--muted); padding: 28px; text-align: center; }
+    .row-actions { display: flex; gap: 6px; opacity: 0; transition: opacity .15s; }
+    .item:hover .row-actions, .item:focus-within .row-actions { opacity: 1; }
+    .icon {
+      align-items: center; background: transparent; border: 0; border-radius: 8px; color: var(--muted);
+      display: inline-flex; height: 30px; justify-content: center; min-width: 30px; padding: 0 8px;
+    }
+    .icon:hover { background: var(--soft); color: var(--ink); }
+    .icon.danger:hover { background: #fde9e7; color: var(--danger); }
+    .check {
+      appearance: none; border: 2px solid #91a298; border-radius: 7px; height: 23px; margin: 0; width: 23px;
+    }
+    .check:checked { background: var(--accent); border-color: var(--accent); }
+    .check:checked::after { color: white; content: "✓"; display: block; font-size: 15px; font-weight: 900; line-height: 18px; text-align: center; }
+    .item { align-items: center; display: grid; gap: 12px; grid-template-columns: auto 1fr auto; }
+    .item.done .item-text { color: #819087; text-decoration: line-through; }
+    .item-text { overflow-wrap: anywhere; }
+    .add { display: flex; gap: 8px; }
+    .add input { border: 1px solid var(--line); border-radius: 10px; min-width: 0; padding: 11px 13px; width: 100%; }
+    .primary { background: var(--accent); border: 0; border-radius: 10px; color: white; font-weight: 750; padding: 10px 16px; }
+    .sort { background: transparent; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); padding: 7px 11px; }
+    .sort.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+    .prototype-note {
+      background: #fff6d8; border-bottom: 1px solid #ecd782; color: #65551e; font-size: 12px; padding: 7px 16px; text-align: center;
+    }
+
+    /* Variant A: productivity split pane */
+    .a-shell { display: grid; grid-template-columns: 280px minmax(0, 1fr); min-height: calc(100vh - 31px); }
+    .a-side { background: #173a2b; color: white; padding: 28px 18px; }
+    .a-brand { font-size: 22px; font-weight: 850; margin: 0 10px 26px; }
+    .a-new-list { background: #2d5945; border: 1px solid #527461; border-radius: 10px; color: white; margin: 0 6px 20px; padding: 10px 12px; width: calc(100% - 12px); }
+    .a-list {
+      align-items: center; background: transparent; border: 0; border-radius: 10px; color: #dce9e2;
+      display: flex; justify-content: space-between; margin: 3px 0; padding: 12px; text-align: left; width: 100%;
+    }
+    .a-list.active { background: white; color: var(--ink); }
+    .a-main { background: var(--surface); padding: 44px clamp(24px, 7vw, 96px); }
+    .a-head { align-items: end; display: flex; justify-content: space-between; margin-bottom: 28px; }
+    .a-head h1 { font-size: clamp(30px, 5vw, 48px); letter-spacing: -.04em; margin: 4px 0; }
+    .a-items { border-top: 1px solid var(--line); margin: 20px 0; }
+    .a-items .item { border-bottom: 1px solid var(--line); min-height: 58px; padding: 10px 4px; }
+
+    /* Variant B: overview cards */
+    .b-shell { background: #f4eee5; min-height: calc(100vh - 31px); padding: 32px clamp(18px, 5vw, 70px); }
+    .b-top { align-items: center; display: flex; justify-content: space-between; margin: 0 auto 28px; max-width: 1180px; }
+    .b-top h1 { font-family: Georgia, serif; font-size: 36px; margin: 0; }
+    .b-grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); margin: auto; max-width: 1180px; }
+    .b-card {
+      background: #fffdf9; border: 1px solid #ded4c6; border-radius: 18px; box-shadow: 0 8px 30px #79664a10;
+      display: flex; flex-direction: column; min-height: 330px; overflow: hidden;
+    }
+    .b-card-head { align-items: center; display: flex; justify-content: space-between; padding: 20px 20px 13px; }
+    .b-card h2 { font-family: Georgia, serif; font-size: 24px; margin: 0; }
+    .b-items { flex: 1; padding: 0 12px; }
+    .b-items .item { border-top: 1px solid #eee5d9; min-height: 50px; padding: 8px; }
+    .b-card .add { background: #f8f1e8; border-top: 1px solid #ded4c6; padding: 12px; }
+    .b-overflow { color: #866f52; font-size: 13px; padding: 10px 20px 16px; }
+    .b-open {
+      background: transparent; border: 0; border-top: 1px solid #ded4c6; color: #6f593e;
+      font-weight: 750; padding: 13px 20px; text-align: left; width: 100%;
+    }
+    .b-open:hover { background: #f8f1e8; }
+    .b-detail { margin: auto; max-width: 760px; }
+    .b-back { background: transparent; border: 0; color: #6f593e; margin: 0 0 16px; padding: 6px 0; }
+    .b-detail .b-card { min-height: 0; }
+
+    /* Variant C: calm single-list focus */
+    .c-shell { background: #eef3f8; min-height: calc(100vh - 31px); padding: 26px 18px; }
+    .c-wrap { margin: auto; max-width: 720px; }
+    .c-nav { align-items: center; display: flex; gap: 8px; margin-bottom: 26px; overflow-x: auto; padding: 2px; }
+    .c-list {
+      background: transparent; border: 1px solid #c9d5df; border-radius: 999px; color: #526575;
+      flex: 0 0 auto; padding: 9px 14px;
+    }
+    .c-list.active { background: #17364e; border-color: #17364e; color: white; }
+    .c-panel { background: white; border: 1px solid #d6e0e8; border-radius: 26px; box-shadow: 0 20px 50px #34516a14; padding: clamp(22px, 5vw, 44px); }
+    .c-title { align-items: start; display: flex; justify-content: space-between; margin-bottom: 28px; }
+    .c-title h1 { font-size: clamp(34px, 7vw, 54px); letter-spacing: -.05em; margin: 3px 0; }
+    .c-items { display: grid; gap: 10px; margin: 22px 0; }
+    .c-items .item { background: #f6f9fb; border: 1px solid #e0e7ed; border-radius: 14px; min-height: 58px; padding: 10px 12px; }
+    .c-add { background: #17364e; border-radius: 16px; padding: 12px; }
+    .c-add input { background: white; }
+    .c-add .primary { background: #75c7a1; color: #102b20; }
+
+    .switcher {
+      align-items: center; background: #111814; border: 1px solid #405047; border-radius: 999px; bottom: 20px;
+      box-shadow: 0 12px 38px #0005; color: white; display: flex; gap: 8px; left: 50%; padding: 7px;
+      position: fixed; transform: translateX(-50%); z-index: 20;
+    }
+    .switcher button { background: #26332c; border: 0; border-radius: 999px; color: white; height: 38px; width: 38px; }
+    .switch-label { font-size: 13px; font-weight: 750; min-width: 190px; text-align: center; }
+    .state {
+      background: #111814; border-radius: 10px; bottom: 75px; color: #cfe0d6; font: 11px/1.45 ui-monospace, monospace;
+      max-height: 150px; max-width: min(480px, calc(100vw - 24px)); opacity: .88; overflow: auto; padding: 10px;
+      position: fixed; right: 12px; white-space: pre-wrap; z-index: 19;
+    }
+
+    @media (max-width: 839px) {
+      .a-shell { display: block; }
+      .a-side { padding: 16px; }
+      .a-brand, .a-new-list { display: none; }
+      .a-side nav { display: flex; gap: 8px; overflow-x: auto; }
+      .a-list { flex: 0 0 auto; width: auto; }
+      .a-main { padding: 28px 18px; }
+      .a-head { align-items: start; flex-direction: column; gap: 12px; }
+      .b-shell { padding: 24px 14px; }
+      .b-grid { display: block; }
+      .b-card { margin-bottom: 16px; }
+      .row-actions { opacity: 1; }
+      .state { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="prototype-note">Throwaway UI prototype — changes live only in memory</div>
+  <main id="root" class="app"></main>
+  <pre id="state" class="state"></pre>
+  <div class="switcher" aria-label="Prototype variant switcher">
+    <button id="prev" aria-label="Previous variant">←</button>
+    <div id="variant-label" class="switch-label"></div>
+    <button id="next" aria-label="Next variant">→</button>
+  </div>
+
+  <script>
+    const variants = [
+      { key: "A", name: "Adaptive split + cards" },
+      { key: "B", name: "At-a-glance cards" },
+      { key: "C", name: "Calm single-list focus" }
+    ];
+
+    const state = {
+      selectedListId: "groceries",
+      alphabetical: false,
+      hideMarked: false,
+      openedCardListId: null,
+      lists: [
+        {
+          id: "groceries",
+          name: "Groceries",
+          items: [
+            { id: "g1", text: "Oat milk", marked: false },
+            { id: "g2", text: "Bananas", marked: true },
+            { id: "g3", text: "Sourdough bread", marked: false },
+            { id: "g4", text: "Coffee beans", marked: false }
+          ]
+        },
+        {
+          id: "weekend",
+          name: "Weekend",
+          items: [
+            { id: "w1", text: "Book campsite", marked: true },
+            { id: "w2", text: "Pack rain jackets", marked: false },
+            { id: "w3", text: "Charge camera", marked: false }
+          ]
+        },
+        {
+          id: "house",
+          name: "House",
+          items: [
+            { id: "h1", text: "Replace hallway bulb", marked: false },
+            { id: "h2", text: "Water herbs", marked: true }
+          ]
+        }
+      ]
+    };
+
+    function currentVariant() {
+      const key = new URLSearchParams(location.search).get("variant")?.toUpperCase();
+      return variants.find((variant) => variant.key === key) || variants[0];
+    }
+
+    function selectedList() {
+      return state.lists.find((list) => list.id === state.selectedListId) || state.lists[0];
+    }
+
+    function visibleItems(list) {
+      const items = state.hideMarked ? list.items.filter((item) => !item.marked) : [...list.items];
+      return state.alphabetical
+        ? items.sort((left, right) => left.text.localeCompare(right.text, undefined, { sensitivity: "base" }))
+        : items;
+    }
+
+    function itemMarkup(item, allowMove = true) {
+      return `
+        <div class="item ${item.marked ? "done" : ""}" data-item="${item.id}">
+          <input class="check" type="checkbox" ${item.marked ? "checked" : ""} aria-label="Mark ${escapeHtml(item.text)}">
+          <span class="item-text">${escapeHtml(item.text)}</span>
+          <span class="row-actions">
+            ${allowMove && !state.alphabetical ? `<button class="icon move-up" title="Move up">↑</button><button class="icon move-down" title="Move down">↓</button>` : ""}
+            <button class="icon edit" title="Edit">Edit</button>
+            <button class="icon danger delete" title="Delete">×</button>
+          </span>
+        </div>`;
+    }
+
+    function previewItemMarkup(item) {
+      return `
+        <div class="item ${item.marked ? "done" : ""}" data-item="${item.id}">
+          <input class="check" type="checkbox" ${item.marked ? "checked" : ""} aria-label="Mark ${escapeHtml(item.text)}">
+          <span class="item-text">${escapeHtml(item.text)}</span>
+          <span></span>
+        </div>`;
+    }
+
+    function addMarkup(className = "") {
+      return `<form class="add ${className}"><input name="item" maxlength="500" placeholder="Add an item…" autocomplete="off"><button class="primary">Add</button></form>`;
+    }
+
+    function listButtons(className) {
+      return [...state.lists]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((list) => {
+          const remaining = list.items.filter((item) => !item.marked).length;
+          return `<button class="${className} ${list.id === state.selectedListId ? "active" : ""}" data-list="${list.id}"><span>${escapeHtml(list.name)}</span><span class="count">${remaining}</span></button>`;
+        }).join("");
+    }
+
+    function variantA() {
+      const list = selectedList();
+      return `
+        <section class="a-shell">
+          <aside class="a-side">
+            <div class="a-brand">Shared Lists</div>
+            <button class="a-new-list">＋ New list</button>
+            <nav>${listButtons("a-list")}</nav>
+          </aside>
+          <section class="a-main">
+            <header class="a-head">
+              <div><div class="eyebrow">Shared with all devices</div><h1>${escapeHtml(list.name)}</h1><div class="muted">${list.items.filter(i => !i.marked).length} remaining · ${list.items.length} total</div></div>
+              <div><button class="hide-marked sort ${state.hideMarked ? "active" : ""}">${state.hideMarked ? "Marked hidden" : "Show marked"}</button> <button class="sort sort-mode ${state.alphabetical ? "active" : ""}">${state.alphabetical ? "A–Z view" : "Manual order"}</button></div>
+            </header>
+            ${addMarkup()}
+            <div class="a-items">${visibleItems(list).map((item) => itemMarkup(item)).join("") || `<div class="empty">Nothing here yet.</div>`}</div>
+          </section>
+        </section>`;
+    }
+
+    function variantB() {
+      if (state.openedCardListId) {
+        const list = state.lists.find((candidate) => candidate.id === state.openedCardListId) || state.lists[0];
+        const items = visibleItems(list);
+        return `
+          <section class="b-shell">
+            <div class="b-detail">
+              <button class="b-back" data-close-list>← All lists</button>
+              <article class="b-card" data-card-list="${list.id}">
+                <header class="b-card-head">
+                  <div><div class="eyebrow">Full list</div><h2>${escapeHtml(list.name)}</h2><span class="count">${items.filter(i => !i.marked).length} remaining · ${items.length} total</span></div>
+                  <div><button class="hide-marked sort ${state.hideMarked ? "active" : ""}">${state.hideMarked ? "Marked hidden" : "Show marked"}</button> <button class="sort sort-mode ${state.alphabetical ? "active" : ""}">${state.alphabetical ? "A–Z" : "Manual"}</button></div>
+                </header>
+                <div class="b-items">${items.map((item) => itemMarkup(item)).join("") || `<div class="empty">Nothing here yet.</div>`}</div>
+                ${addMarkup()}
+              </article>
+            </div>
+          </section>`;
+      }
+      return `
+        <section class="b-shell">
+          <header class="b-top"><div><div class="eyebrow">Everything shared</div><h1>Your lists</h1></div><button class="primary">New list</button></header>
+          <section class="b-grid">
+            ${[...state.lists].sort((a, b) => a.name.localeCompare(b.name)).map((list) => {
+              const items = visibleItems(list);
+              const previewItems = list.items.filter((item) => !item.marked).slice(0, 4);
+              const hiddenCount = Math.max(0, list.items.length - previewItems.length);
+              return `<article class="b-card" data-card-list="${list.id}">
+                <header class="b-card-head"><div><h2>${escapeHtml(list.name)}</h2><span class="count">${previewItems.length ? `${list.items.filter(i => !i.marked).length} remaining` : "All marked"}</span></div></header>
+                <div class="b-items">${previewItems.map((item) => previewItemMarkup(item)).join("") || `<div class="empty">Everything is marked.</div>`}</div>
+                ${hiddenCount ? `<div class="b-overflow">${hiddenCount} marked or outside this preview</div>` : ""}
+                ${addMarkup()}
+                <button class="b-open" data-open-list="${list.id}">Open full list →</button>
+              </article>`;
+            }).join("")}
+          </section>
+        </section>`;
+    }
+
+    function variantC() {
+      const list = selectedList();
+      return `
+        <section class="c-shell">
+          <div class="c-wrap">
+            <nav class="c-nav">${listButtons("c-list")}</nav>
+            <section class="c-panel">
+              <header class="c-title">
+                <div><div class="eyebrow">One thing at a time</div><h1>${escapeHtml(list.name)}</h1><div class="muted">${list.items.filter(i => !i.marked).length} left to do</div></div>
+                <div><button class="hide-marked sort ${state.hideMarked ? "active" : ""}">${state.hideMarked ? "Marked hidden" : "Show marked"}</button> <button class="sort sort-mode ${state.alphabetical ? "active" : ""}">${state.alphabetical ? "A–Z" : "Manual"}</button></div>
+              </header>
+              <div class="c-items">${visibleItems(list).map((item) => itemMarkup(item)).join("") || `<div class="empty">This list is clear.</div>`}</div>
+              ${addMarkup("c-add")}
+            </section>
+          </div>
+        </section>`;
+    }
+
+    function render() {
+      const variant = currentVariant();
+      const adaptiveMobile = variant.key === "A" && matchMedia("(max-width: 839px)").matches;
+      document.querySelector("#root").innerHTML = variant.key === "A"
+        ? (adaptiveMobile ? variantB() : variantA())
+        : variant.key === "B" ? variantB() : variantC();
+      document.querySelector("#variant-label").textContent = `${variant.key} · ${variant.name}`;
+      document.querySelector("#state").textContent = JSON.stringify({
+        variant: variant.key,
+        selectedListId: state.selectedListId,
+        alphabeticalView: state.alphabetical,
+        hideMarked: state.hideMarked,
+        lists: state.lists
+      }, null, 2);
+      wireInteractions();
+    }
+
+    function wireInteractions() {
+      document.querySelectorAll("[data-list]").forEach((button) => button.addEventListener("click", () => {
+        state.selectedListId = button.dataset.list;
+        state.alphabetical = false;
+        state.hideMarked = false;
+        render();
+      }));
+      document.querySelectorAll("[data-open-list]").forEach((button) => button.addEventListener("click", () => {
+        state.openedCardListId = button.dataset.openList;
+        state.selectedListId = button.dataset.openList;
+        state.alphabetical = false;
+        state.hideMarked = false;
+        render();
+      }));
+      document.querySelector("[data-close-list]")?.addEventListener("click", () => {
+        state.openedCardListId = null;
+        state.alphabetical = false;
+        state.hideMarked = false;
+        render();
+      });
+      document.querySelectorAll(".sort-mode").forEach((button) => button.addEventListener("click", () => {
+        state.alphabetical = !state.alphabetical;
+        render();
+      }));
+      document.querySelectorAll(".hide-marked").forEach((button) => button.addEventListener("click", () => {
+        state.hideMarked = !state.hideMarked;
+        render();
+      }));
+      document.querySelectorAll(".add").forEach((form) => form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const text = new FormData(form).get("item").trim();
+        if (!text) return;
+        const list = form.closest("[data-card-list]")
+          ? state.lists.find((candidate) => candidate.id === form.closest("[data-card-list]").dataset.cardList)
+          : selectedList();
+        const duplicate = list.items.some((item) => item.text.localeCompare(text, undefined, { sensitivity: "base" }) === 0);
+        if (duplicate && !confirm("This already exists. Add another item?")) return;
+        list.items.push({ id: crypto.randomUUID(), text, marked: false });
+        render();
+      }));
+      document.querySelectorAll(".item").forEach((row) => {
+        const list = row.closest("[data-card-list]")
+          ? state.lists.find((candidate) => candidate.id === row.closest("[data-card-list]").dataset.cardList)
+          : selectedList();
+        const item = list.items.find((candidate) => candidate.id === row.dataset.item);
+        row.querySelector(".check").addEventListener("change", (event) => { item.marked = event.target.checked; render(); });
+        row.querySelector(".delete")?.addEventListener("click", () => { list.items = list.items.filter((candidate) => candidate.id !== item.id); render(); });
+        row.querySelector(".edit")?.addEventListener("click", () => {
+          const text = prompt("Edit item", item.text)?.trim();
+          if (text) { item.text = text; render(); }
+        });
+        row.querySelector(".move-up")?.addEventListener("click", () => move(list, item.id, -1));
+        row.querySelector(".move-down")?.addEventListener("click", () => move(list, item.id, 1));
+      });
+    }
+
+    function move(list, itemId, offset) {
+      const index = list.items.findIndex((item) => item.id === itemId);
+      const target = Math.max(0, Math.min(list.items.length - 1, index + offset));
+      if (target === index) return;
+      const [item] = list.items.splice(index, 1);
+      list.items.splice(target, 0, item);
+      render();
+    }
+
+    function switchVariant(offset) {
+      const current = currentVariant();
+      const index = variants.findIndex((variant) => variant.key === current.key);
+      const next = variants[(index + offset + variants.length) % variants.length];
+      const url = new URL(location.href);
+      url.searchParams.set("variant", next.key);
+      state.openedCardListId = null;
+      state.alphabetical = false;
+      state.hideMarked = false;
+      history.replaceState({}, "", url);
+      render();
+    }
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character]);
+    }
+
+    document.querySelector("#prev").addEventListener("click", () => switchVariant(-1));
+    document.querySelector("#next").addEventListener("click", () => switchVariant(1));
+    window.addEventListener("keydown", (event) => {
+      if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) || document.activeElement.isContentEditable) return;
+      if (event.key === "ArrowLeft") switchVariant(-1);
+      if (event.key === "ArrowRight") switchVariant(1);
+    });
+    window.addEventListener("popstate", render);
+    matchMedia("(max-width: 839px)").addEventListener("change", render);
+    render();
+  </script>
+</body>
+</html>

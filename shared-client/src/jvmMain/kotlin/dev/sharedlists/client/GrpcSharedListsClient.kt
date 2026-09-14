@@ -10,6 +10,7 @@ import dev.sharedlists.protocol.DeleteList as ProtoDeleteList
 import dev.sharedlists.protocol.EditItemText as ProtoEditItemText
 import dev.sharedlists.protocol.JournalEntry
 import dev.sharedlists.protocol.Live
+import dev.sharedlists.protocol.MoveItem as ProtoMoveItem
 import dev.sharedlists.protocol.OpenSync
 import dev.sharedlists.protocol.OperationOutcome as ProtoOperationOutcome
 import dev.sharedlists.protocol.RenameList as ProtoRenameList
@@ -156,9 +157,10 @@ class GrpcSharedListsClient(
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
-) : SharedListsClient {
+) : ObservableSharedListsClient, SharedListsClient {
     private var activeSession: ActiveSession? = null
     private var cachedState = stateStore.loadCanonicalState()
+    private var stateObserver: (ClientState.Ready) -> Unit = {}
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override suspend fun synchronize(): ClientState {
@@ -202,6 +204,11 @@ class GrpcSharedListsClient(
     override suspend fun submit(command: EditCommand): ClientState {
         val session = requireNotNull(activeSession) { "Synchronization is not live." }
         return session.submit(command)
+    }
+
+    override fun observeState(observer: (ClientState.Ready) -> Unit) {
+        stateObserver = observer
+        activeSession?.let { observer(it.ready()) }
     }
 
     private inner class ActiveSession(
@@ -389,6 +396,27 @@ class GrpcSharedListsClient(
                         }
                     }
                     ClientOperation.OperationCase.DELETE_LIST -> lists.removeAll { it.id.value == operation.deleteList.listId }
+                    ClientOperation.OperationCase.MOVE_ITEM -> {
+                        val index = lists.indexOfFirst { it.id.value == operation.moveItem.listId }
+                        if (index >= 0) {
+                            val items = lists[index].items
+                            val item = items.firstOrNull { it.id.value == operation.moveItem.itemId }
+                            if (item != null) {
+                                val remaining = items.filterNot { it.id == item.id }.toMutableList()
+                                val predecessor = operation.moveItem.predecessorItemId
+                                val successor = operation.moveItem.successorItemId
+                                val destination = when {
+                                    predecessor.isNotEmpty() -> remaining.indexOfFirst { it.id.value == predecessor }.takeIf { it >= 0 }?.plus(1)
+                                    else -> null
+                                } ?: when {
+                                    successor.isNotEmpty() -> remaining.indexOfFirst { it.id.value == successor }.takeIf { it >= 0 }
+                                    else -> null
+                                } ?: remaining.size
+                                remaining.add(destination, item)
+                                lists[index] = lists[index].copy(items = remaining)
+                            }
+                        }
+                    }
                     ClientOperation.OperationCase.OPERATION_NOT_SET -> error("Journal entry has no operation.")
                 }
                 canonicalState = CanonicalState(lists.sortedBy { it.name.lowercase() })
@@ -396,6 +424,7 @@ class GrpcSharedListsClient(
             }
             cursor = SynchronizationCursor(cursor.generation, entry.revision)
             persistAndAcknowledge()
+            stateObserver(ready())
             if (unconfirmedOutcome != null && operation.operationId == unconfirmedOperationId) {
                 unconfirmedOutcome?.complete(DurableOperationOutcome(OperationId.parse(operation.operationId), entry.outcome.toClientOutcome()))
             }
@@ -436,6 +465,15 @@ class GrpcSharedListsClient(
                             .setItemId(itemId.value)
                             .setListId(listId.value)
                             .setText(text),
+                    )
+                    is MoveItem -> setMoveItem(
+                        ProtoMoveItem.newBuilder()
+                            .setItemId(itemId.value)
+                            .setListId(listId.value)
+                            .also { move ->
+                                predecessorItemId?.let { move.predecessorItemId = it.value }
+                                successorItemId?.let { move.successorItemId = it.value }
+                            },
                     )
                     is RenameList -> setRenameList(ProtoRenameList.newBuilder().setListId(listId.value).setName(name))
                     is SetMarked -> setSetMarked(

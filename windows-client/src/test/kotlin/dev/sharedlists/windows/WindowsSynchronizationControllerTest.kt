@@ -8,13 +8,17 @@ import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.ListItem
+import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.ListItemId
 import dev.sharedlists.client.SetMarked
 import dev.sharedlists.client.SharedList
 import dev.sharedlists.client.SharedListId
 import dev.sharedlists.client.SharedListsClient
 import dev.sharedlists.client.SynchronizationCursor
+import java.awt.Point
 import java.io.File
+import javax.swing.DefaultListModel
+import javax.swing.JList
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.suspendCoroutine
 import kotlin.test.Test
@@ -177,6 +181,33 @@ class WindowsSynchronizationControllerTest {
     }
 
     @Test
+    fun `local sort and marked filtering do not mutate canonical order or submit operations`() {
+        val list = SharedList(
+            id = SharedListId.parse("a0000000-0000-4000-8000-000000000001"),
+            name = "Groceries",
+            items = listOf(
+                ListItem(ListItemId.parse("b0000000-0000-4000-8000-000000000001"), text = "Zucchini"),
+                ListItem(ListItemId.parse("c0000000-0000-4000-8000-000000000001"), marked = true, text = "Apples"),
+                ListItem(ListItemId.parse("d0000000-0000-4000-8000-000000000001"), text = "Bananas"),
+            ),
+        )
+        val facade = CapturingSharedListsClient(liveState(CanonicalState(listOf(list))))
+        val controller = controller(facade, InMemoryServerConfigurationStore())
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+
+        controller.setAlphabeticalSort(true)
+        assertEquals(listOf("Apples", "Bananas", "Zucchini"), controller.items(list.id).map { it.text })
+        assertFalse(controller.presentation().reorderingEnabled)
+        controller.setHideMarked(true)
+        assertEquals(listOf("Bananas", "Zucchini"), controller.items(list.id).map { it.text })
+        assertTrue(facade.commands.isEmpty())
+
+        controller.setAlphabeticalSort(false)
+        controller.setHideMarked(false)
+        assertEquals(listOf("Zucchini", "Apples", "Bananas"), controller.items(list.id).map { it.text })
+    }
+
+    @Test
     fun `item presentation submits an explicit marked value only while live`() {
         val list = SharedList(
             id = SharedListId.parse("a0000000-0000-4000-8000-000000000001"),
@@ -224,6 +255,48 @@ class WindowsSynchronizationControllerTest {
     fun `layout mode uses the wide breakpoint`() {
         assertEquals(WindowsLayoutMode.NARROW, WindowsLayoutMode.forWidth(839))
         assertEquals(WindowsLayoutMode.WIDE, WindowsLayoutMode.forWidth(840))
+    }
+
+    @Test
+    fun `live full-list reordering submits neighboring anchors`() {
+        val list = SharedList(
+            id = SharedListId.parse("a0000000-0000-4000-8000-000000000001"),
+            name = "Groceries",
+            items = listOf(
+                ListItem(ListItemId.parse("b0000000-0000-4000-8000-000000000001"), text = "First"),
+                ListItem(ListItemId.parse("c0000000-0000-4000-8000-000000000001"), text = "Second"),
+                ListItem(ListItemId.parse("d0000000-0000-4000-8000-000000000001"), text = "Third"),
+            ),
+        )
+        val facade = CapturingSharedListsClient(liveState(CanonicalState(listOf(list))))
+        val controller = controller(facade, InMemoryServerConfigurationStore())
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+
+        controller.moveItem(list.id, list.items[2].id, 0)
+
+        val command = facade.commands.single() as MoveItem
+        assertNull(command.predecessorItemId)
+        assertEquals(list.items[0].id, command.successorItemId)
+    }
+
+    @Test
+    fun `dragging a list row yields a move but empty space does not`() {
+        val model = DefaultListModel<String>().apply {
+            addElement("First")
+            addElement("Second")
+        }
+        val itemView = JList(model).apply {
+            fixedCellHeight = 20
+            fixedCellWidth = 100
+            setSize(100, 40)
+        }
+        val gesture = WindowsItemReorderGesture()
+
+        gesture.begin(itemView, Point(10, 10))
+        assertEquals(0 to 1, gesture.finish(itemView, Point(10, 30)))
+
+        gesture.begin(itemView, Point(10, 60))
+        assertNull(gesture.finish(itemView, Point(10, 10)))
     }
 
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =

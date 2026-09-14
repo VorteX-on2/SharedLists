@@ -109,6 +109,13 @@ message DeleteItem {
   string item_id = 2;
 }
 
+message MoveItem {
+  string list_id = 1;
+  string item_id = 2;
+  optional string predecessor_item_id = 3;
+  optional string successor_item_id = 4;
+}
+
 message ClientOperation {
   string operation_id = 1;
   oneof operation {
@@ -119,6 +126,7 @@ message ClientOperation {
     EditItemText edit_item_text = 6;
     DeleteItem delete_item = 7;
     SetMarked set_marked = 8;
+    MoveItem move_item = 9;
   }
 }
 

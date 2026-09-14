@@ -14,6 +14,7 @@ import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.GrpcSharedListsClient
 import dev.sharedlists.client.ListItemId
+import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
 import dev.sharedlists.client.RenameList
@@ -209,6 +210,7 @@ class RealServerAcceptanceTest {
                         ),
                     )
                 }
+
                 fixture.restart()
                 assertEquals(
                     listOf("Milk"),
@@ -218,46 +220,25 @@ class RealServerAcceptanceTest {
     }
 
     @Test
-    fun `independent real clients converge on marked state across restart`() {
+    fun `remote clients receive authoritative moved item order`() {
         TemporaryServerInstallation().use { fixture ->
             fixture.start()
             val first = fixture.client(0)
             val second = fixture.client(1)
-            val listId = SharedListId.parse("6111111a-1111-4111-8111-111111111111")
-            val itemId = ListItemId.parse("7111111a-1111-4111-8111-111111111111")
-
+            val listId = SharedListId.parse("11111111-1111-4111-8111-111111111111")
+            val firstItem = ListItemId.parse("31111111-1111-4111-8111-111111111111")
+            val secondItem = ListItemId.parse("41111111-1111-4111-8111-111111111111")
             first.synchronizeBlocking()
-            first.submitBlocking(
-                CreateList(OperationId.parse("9111111a-1111-4111-8111-111111111111"), listId, "Groceries"),
-            )
-            first.submitBlocking(
-                CreateItem(
-                    itemId = itemId,
-                    listId = listId,
-                    operationId = OperationId.parse("a111111a-1111-4111-8111-111111111111"),
-                    text = "Milk",
-                ),
-            )
-            val mark = SetMarked(
-                itemId = itemId,
-                listId = listId,
-                operationId = OperationId.parse("b111111a-1111-4111-8111-111111111111"),
-                value = true,
-            )
-            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(mark).lastOperationOutcome?.outcome)
-            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(mark).lastOperationOutcome?.outcome)
-            assertTrue(second.synchronizeBlocking().canonicalState.lists.single().items.single().marked)
+            first.submitBlocking(CreateList(OperationId.parse("21111111-1111-4111-8111-111111111111"), listId, "Groceries"))
+            first.submitBlocking(CreateItem(firstItem, listId, OperationId.parse("51111111-1111-4111-8111-111111111111"), "Milk"))
+            first.submitBlocking(CreateItem(secondItem, listId, OperationId.parse("61111111-1111-4111-8111-111111111111"), "Bread"))
 
-            first.submitBlocking(
-                SetMarked(
-                    itemId = itemId,
-                    listId = listId,
-                    operationId = OperationId.parse("c111111a-1111-4111-8111-111111111111"),
-                    value = false,
-                ),
+            first.submitBlocking(MoveItem(secondItem, listId, OperationId.parse("71111111-1111-4111-8111-111111111111"), null, firstItem))
+
+            assertEquals(
+                listOf("Bread", "Milk"),
+                second.synchronizeBlocking().canonicalState.lists.single().items.map { it.text },
             )
-            fixture.restart()
-            assertEquals(false, fixture.client(1).synchronizeBlocking().canonicalState.lists.single().items.single().marked)
         }
     }
 

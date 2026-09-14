@@ -157,8 +157,20 @@ data class SetMarked(
     val value: Boolean,
 ) : EditCommand
 
+data class MoveItem(
+    val itemId: ListItemId,
+    val listId: SharedListId,
+    override val operationId: OperationId,
+    val predecessorItemId: ListItemId?,
+    val successorItemId: ListItemId?,
+) : EditCommand
+
 interface SharedListsClient {
     suspend fun synchronize(): ClientState
 
     suspend fun submit(command: EditCommand): ClientState
+}
+
+interface ObservableSharedListsClient {
+    fun observeState(observer: (ClientState.Ready) -> Unit)
 }

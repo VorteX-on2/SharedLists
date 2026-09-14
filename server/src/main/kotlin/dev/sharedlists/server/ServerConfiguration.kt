@@ -4,6 +4,7 @@ import java.nio.file.Path
 import kotlin.io.path.readLines
 
 internal data class ServerConfiguration(
+    val authorizedDevicesDirectory: Path,
     val bindAddress: String,
     val databaseFile: Path,
     val port: Int,
@@ -17,6 +18,7 @@ internal data class ServerConfiguration(
     companion object {
         private val REQUIRED_KEYS = setOf(
             "bindAddress",
+            "authorizedDevicesDirectory",
             "databaseFile",
             "port",
             "serverIp",
@@ -35,6 +37,7 @@ internal data class ServerConfiguration(
             require(properties.keys == REQUIRED_KEYS) { "Configuration keys do not match the supported schema." }
             val baseDirectory = file.parent
             return ServerConfiguration(
+                authorizedDevicesDirectory = resolve(baseDirectory, properties.getValue("authorizedDevicesDirectory")),
                 bindAddress = properties.getValue("bindAddress"),
                 databaseFile = resolve(baseDirectory, properties.getValue("databaseFile")),
                 port = properties.getValue("port").toInt().also { require(it in 1..65535) },

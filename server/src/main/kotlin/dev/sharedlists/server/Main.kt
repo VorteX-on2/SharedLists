@@ -12,13 +12,18 @@ fun main(args: Array<String>) {
     }
     val configuration = ServerConfiguration.load(Path.of(args[1]))
     val identity = ServerIdentityManager.loadOrCreate(configuration)
+    val authenticator = ChallengeAuthenticator(
+        configuration.serviceUri,
+        AuthorizedDeviceKeys.load(configuration.authorizedDevicesDirectory),
+    )
     SqliteCanonicalStore(configuration.databaseFile).use { store ->
         val server = NettyServerBuilder
             .forAddress(InetSocketAddress(InetAddress.getByName(configuration.bindAddress), configuration.port))
             .useTransportSecurity(identity.certificateFile.toFile(), identity.privateKeyFile.toFile())
             .addService(
                 ServerInterceptors.intercept(
-                    SharedListsService(store, System.getProperty("sharedlists.testPreAuthenticatedClient").toBoolean()),
+                    SharedListsService(authenticator, store),
+                    AuthenticationInterceptor(authenticator),
                     RequestHeadersInterceptor(),
                 ),
             ).build()

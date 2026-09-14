@@ -1,6 +1,7 @@
 package dev.sharedlists.client
 
 import dev.sharedlists.protocol.AppliedThrough
+import dev.sharedlists.protocol.ChallengeRequest
 import dev.sharedlists.protocol.Live
 import dev.sharedlists.protocol.OpenSync
 import dev.sharedlists.protocol.SharedListsGrpcKt
@@ -23,6 +24,8 @@ import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
+import java.time.Instant
+import java.util.Base64
 import java.util.Properties
 import javax.net.ssl.ManagerFactoryParameters
 import javax.net.ssl.TrustManager
@@ -85,65 +88,81 @@ class FileClientStateStore(
 }
 
 class GrpcSharedListsClient(
+    private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
-    private val preAuthenticatedForTest: Boolean = false,
 ) : SharedListsClient {
     override suspend fun synchronize(): ClientState {
         val channel = NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
             .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
             .build()
-        return coroutineScope {
-            val stub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
-                .withInterceptors(FixtureAuthenticationInterceptor(preAuthenticatedForTest))
-            val requests = CoroutineChannel<SyncRequest>()
-            val initialResponse = CompletableDeferred<SyncResponse>()
-            val live = CompletableDeferred<Live>()
-            val responseJob = launch {
-                stub.sync(requests.receiveAsFlow()).collect { response ->
-                    initialResponse.complete(response)
-                    if (response.hasLive()) live.complete(response.live)
+        try {
+            return coroutineScope {
+                val unauthenticatedStub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
+                val challenge = unauthenticatedStub.getChallenge(
+                    ChallengeRequest.newBuilder().setKeyFingerprint(deviceSigner.keyFingerprint).build(),
+                )
+                val token = StreamJwt.create(
+                    deviceSigner,
+                    StreamChallenge(
+                        audience = challenge.audience,
+                        expiresAt = Instant.ofEpochSecond(challenge.expiresAtEpochSeconds),
+                        issuedAt = Instant.ofEpochSecond(challenge.issuedAtEpochSeconds),
+                        nonce = challenge.nonce.toByteArray(),
+                    ),
+                )
+                val stub = unauthenticatedStub.withInterceptors(BearerTokenInterceptor(token))
+                val requests = CoroutineChannel<SyncRequest>()
+                val initialResponse = CompletableDeferred<SyncResponse>()
+                val live = CompletableDeferred<Live>()
+                val responseJob = launch {
+                    stub.sync(requests.receiveAsFlow()).collect { response ->
+                        initialResponse.complete(response)
+                        if (response.hasLive()) live.complete(response.live)
+                    }
                 }
-            }
-            requests.send(
-                SyncRequest.newBuilder().setOpen(
-                    OpenSync.newBuilder().also { open ->
-                        stateStore.loadCursor()?.let { cursor ->
-                            open.cursorBuilder
-                                .setGeneration(cursor.generation)
-                                .setLastAppliedRevision(cursor.lastAppliedRevision)
-                        }
-                    }.build(),
-                ).build(),
-            )
-            val initial = initialResponse.await()
-            val (cursor, receivedLive) = if (initial.hasEmptySnapshot()) {
-                val receivedSnapshot = initial.emptySnapshot
-                val receivedCursor = SynchronizationCursor(receivedSnapshot.generation, receivedSnapshot.revision)
-                stateStore.save(receivedCursor)
                 requests.send(
-                    SyncRequest.newBuilder().setAppliedThrough(
-                        AppliedThrough.newBuilder().setRevision(receivedSnapshot.revision).build(),
+                    SyncRequest.newBuilder().setOpen(
+                        OpenSync.newBuilder().also { open ->
+                            stateStore.loadCursor()?.let { cursor ->
+                                open.cursorBuilder
+                                    .setGeneration(cursor.generation)
+                                    .setLastAppliedRevision(cursor.lastAppliedRevision)
+                            }
+                        }.build(),
                     ).build(),
                 )
-                receivedCursor to live.await()
-            } else {
-                check(initial.hasLive()) { "Server did not provide synchronization state." }
-                val receivedLive = initial.live
-                SynchronizationCursor(receivedLive.generation, receivedLive.revision).also(stateStore::save) to receivedLive
+                val initial = initialResponse.await()
+                val (cursor, receivedLive) = if (initial.hasEmptySnapshot()) {
+                    val receivedSnapshot = initial.emptySnapshot
+                    val receivedCursor = SynchronizationCursor(receivedSnapshot.generation, receivedSnapshot.revision)
+                    stateStore.save(receivedCursor)
+                    requests.send(
+                        SyncRequest.newBuilder().setAppliedThrough(
+                            AppliedThrough.newBuilder().setRevision(receivedSnapshot.revision).build(),
+                        ).build(),
+                    )
+                    receivedCursor to live.await()
+                } else {
+                    check(initial.hasLive()) { "Server did not provide synchronization state." }
+                    val receivedLive = initial.live
+                    SynchronizationCursor(receivedLive.generation, receivedLive.revision)
+                        .also(stateStore::save) to receivedLive
+                }
+                check(receivedLive.generation == cursor.generation && receivedLive.revision == cursor.lastAppliedRevision) {
+                    "Server declared an inconsistent live cursor."
+                }
+                requests.close()
+                responseJob.cancelAndJoin()
+                ClientState.Ready(
+                    enrollment = EnrollmentState.ENROLLED,
+                    connectivity = ConnectivityState.LIVE,
+                    canonicalState = CanonicalState(),
+                    cursor = cursor,
+                )
             }
-            check(receivedLive.generation == cursor.generation && receivedLive.revision == cursor.lastAppliedRevision) {
-                "Server declared an inconsistent live cursor."
-            }
-            requests.close()
-            responseJob.cancelAndJoin()
+        } finally {
             channel.shutdownNow()
-            ClientState.Ready(
-                enrollment = EnrollmentState.ENROLLED,
-                connectivity = ConnectivityState.LIVE,
-                canonicalState = CanonicalState(),
-                cursor = cursor,
-            )
         }
     }
 
@@ -164,8 +183,43 @@ private class PinnedTrustManager(
     override fun engineInit(keyStore: KeyStore?) = Unit
 }
 
-private class FixtureAuthenticationInterceptor(
-    private val enabled: Boolean,
+interface DeviceSigner {
+    val keyFingerprint: String
+
+    fun signEs256(signingInput: ByteArray): ByteArray
+}
+
+data class StreamChallenge(
+    val audience: String,
+    val expiresAt: Instant,
+    val issuedAt: Instant,
+    val nonce: ByteArray,
+)
+
+object StreamJwt {
+    const val TYPE = "sharedlists-stream+jwt"
+
+    fun create(deviceSigner: DeviceSigner, challenge: StreamChallenge): String {
+        require(challenge.nonce.size == 32) { "Authentication challenge must contain 256 bits of entropy." }
+        require(challenge.expiresAt.epochSecond - challenge.issuedAt.epochSecond == 60L) {
+            "Authentication challenge must be valid for 60 seconds."
+        }
+        val keyUrn = "urn:sharedlists:key:${deviceSigner.keyFingerprint}"
+        val header = """{"alg":"ES256","typ":"$TYPE","kid":"${deviceSigner.keyFingerprint}"}"""
+        val payload =
+            """{"iss":"$keyUrn","sub":"$keyUrn","aud":"${challenge.audience}","iat":${challenge.issuedAt.epochSecond},"exp":${challenge.expiresAt.epochSecond},"nonce":"${challenge.nonce.base64Url()}"}"""
+        val signingInput = "${header.encodeToByteArray().base64Url()}.${payload.encodeToByteArray().base64Url()}"
+        val signature = deviceSigner.signEs256(signingInput.encodeToByteArray())
+        require(signature.size == 64) { "DeviceSigner must return a 64-byte JOSE ES256 signature." }
+        return "$signingInput.${signature.base64Url()}"
+    }
+}
+
+private fun ByteArray.base64Url(): String =
+    Base64.getUrlEncoder().withoutPadding().encodeToString(this)
+
+private class BearerTokenInterceptor(
+    private val token: String,
 ) : ClientInterceptor {
     override fun <RequestT : Any, ResponseT : Any> interceptCall(
         method: MethodDescriptor<RequestT, ResponseT>,
@@ -176,17 +230,14 @@ private class FixtureAuthenticationInterceptor(
             next.newCall(method, callOptions),
         ) {
             override fun start(responseListener: Listener<ResponseT>, headers: Metadata) {
-                if (enabled) {
-                    headers.put(TEST_AUTHENTICATION_HEADER, TEST_AUTHENTICATION_VALUE)
-                }
+                headers.put(AUTHORIZATION, "$BEARER_PREFIX$token")
                 super.start(responseListener, headers)
             }
         }
 
     companion object {
-        private val TEST_AUTHENTICATION_HEADER =
-            Metadata.Key.of("x-sharedlists-test-authentication", Metadata.ASCII_STRING_MARSHALLER)
-        private const val TEST_AUTHENTICATION_VALUE = "fixture"
+        private const val BEARER_PREFIX = "Bearer "
+        private val AUTHORIZATION = Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER)
     }
 }
 

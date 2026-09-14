@@ -3,6 +3,7 @@ package dev.sharedlists.server
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
+import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.GrpcSharedListsClient
@@ -13,6 +14,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.security.KeyPair
+import java.security.KeyPairGenerator
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.time.Duration
@@ -66,6 +69,7 @@ private class TemporaryServerInstallation : AutoCloseable {
     private val distribution = directory.resolve("server")
     private val port = ServerSocket(0).use { socket -> socket.localPort }
     private val processOutput = StringBuilder()
+    private val deviceSigner = TestDeviceSigner.create()
     private var process: Process? = null
 
     val certificateFile: Path = directory.resolve("data/tls/server.pem")
@@ -74,10 +78,14 @@ private class TemporaryServerInstallation : AutoCloseable {
 
     init {
         copyDistribution()
-        directory.resolve("data/authorized-devices").let(Files::createDirectories)
+        directory.resolve("data/authorized-devices").also { authorizedDevicesDirectory ->
+            Files.createDirectories(authorizedDevicesDirectory)
+            deviceSigner.writePublicKeyPem(authorizedDevicesDirectory.resolve("fixture.pem"))
+        }
         directory.resolve("sharedlists.properties").writeText(
             """
             bindAddress=127.0.0.1
+            authorizedDevicesDirectory=data/authorized-devices
             port=$port
             serverIp=127.0.0.1
             databaseFile=data/sharedlists.db
@@ -97,8 +105,8 @@ private class TemporaryServerInstallation : AutoCloseable {
     fun client(): GrpcSharedListsClient =
         GrpcSharedListsClient(
             endpoint = ServerEndpoint("127.0.0.1", port, certificateFingerprint()),
+            deviceSigner = deviceSigner,
             stateStore = FileClientStateStore(directory.resolve("client-state.properties").toFile()),
-            preAuthenticatedForTest = true,
         )
 
     fun restart() {
@@ -114,7 +122,6 @@ private class TemporaryServerInstallation : AutoCloseable {
         check(Files.isDirectory(distribution.resolve("lib"))) { "Server distribution is missing: $distribution" }
         process = ProcessBuilder(
             Path.of(System.getProperty("java.home"), "bin", "java.exe").toString(),
-            "-Dsharedlists.testPreAuthenticatedClient=true",
             "-cp",
             "${distribution.resolve("lib")}\\*",
             "dev.sharedlists.server.MainKt",

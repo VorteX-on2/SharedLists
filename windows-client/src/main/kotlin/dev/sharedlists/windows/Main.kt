@@ -1,15 +1,14 @@
 package dev.sharedlists.windows
 
 import java.awt.EventQueue
-import java.util.ServiceLoader
 
 fun main() {
     EventQueue.invokeLater {
-        val signer = ServiceLoader.load(WindowsDeviceSignerProvider::class.java)
-            .findFirst()
-            .orElse(null)
-            ?.load()
-        val controller = WindowsSynchronizationController(WindowsGrpcClientFactory(signer))
+        val enrollment = WindowsCngDeviceEnrollment()
+        val controller = WindowsSynchronizationController(
+            clientFactory = WindowsGrpcClientFactory(enrollment::current),
+            deviceEnrollment = enrollment,
+        )
         WindowsClientFrame(controller).isVisible = true
     }
 }

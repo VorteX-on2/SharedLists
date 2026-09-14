@@ -11,6 +11,7 @@ import dev.sharedlists.client.GrpcSharedListsClient
 import dev.sharedlists.client.ServerEndpoint
 import dev.sharedlists.client.SharedListsClient
 import java.io.File
+import java.io.IOException
 import java.util.prefs.Preferences
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.EmptyCoroutineContext
@@ -76,11 +77,16 @@ class PreferencesServerConfigurationStore(
 }
 
 class WindowsGrpcClientFactory(
-    private val deviceSigner: DeviceSigner?,
+    private val deviceSigner: () -> DeviceSigner?,
     private val stateStore: File = File(System.getProperty("user.home"), ".sharedlists/client-state.properties"),
 ) : WindowsClientFactory {
+    constructor(
+        deviceSigner: DeviceSigner?,
+        stateStore: File = File(System.getProperty("user.home"), ".sharedlists/client-state.properties"),
+    ) : this({ deviceSigner }, stateStore)
+
     override fun create(configuration: ServerConfiguration): SharedListsClient =
-        deviceSigner?.let { signer ->
+        deviceSigner()?.let { signer ->
             GrpcSharedListsClient(
                 deviceSigner = signer,
                 endpoint = ServerEndpoint(
@@ -96,10 +102,13 @@ class WindowsGrpcClientFactory(
 data class WindowsClientPresentation(
     val connectionActive: Boolean,
     val configuration: ServerConfiguration?,
+    val deviceKeyFingerprint: String?,
     val editability: Editability,
     val emptyStateMessage: String?,
+    val exportRequired: Boolean = false,
     val lists: List<String>,
     val statusMessage: String?,
+    val setupRequired: Boolean,
 ) {
     val editingEnabled: Boolean
         get() = editability == Editability.LIVE
@@ -113,22 +122,71 @@ enum class Editability {
 class WindowsSynchronizationController(
     private val clientFactory: WindowsClientFactory,
     private val configurationStore: ServerConfigurationStore = PreferencesServerConfigurationStore(),
+    private val deviceEnrollment: WindowsDeviceEnrollment? = null,
     private val synchronizationRunner: SynchronizationRunner = BackgroundSynchronizationRunner,
 ) {
     private var cachedState = CanonicalState()
     private var connectionAttempt = 0L
+    private var deviceKeyUnreadable = false
     private var stateChanged: (WindowsClientPresentation) -> Unit = {}
     private val storedConfiguration = configurationStore.load()
     private var presentation = WindowsClientPresentation(
         connectionActive = false,
         configuration = storedConfiguration,
+        deviceKeyFingerprint = deviceKeyFingerprint(),
         editability = Editability.READ_ONLY,
-        emptyStateMessage = storedConfiguration
-            ?.let { "Connect to synchronize shared lists." }
-            ?: "Configure a server to begin synchronization.",
+        emptyStateMessage = if (deviceKeyUnreadable) {
+            "Device setup cannot be read. Retry after Windows key storage is available."
+        } else if (!setupRequired()) {
+            storedConfiguration?.let { "Connect to synchronize shared lists." } ?: "Configure a server to begin synchronization."
+        } else {
+            "Device setup is required before connecting."
+        },
         lists = emptyList(),
-        statusMessage = storedConfiguration?.let { "Ready to connect" } ?: "Not configured",
+        statusMessage = if (deviceKeyUnreadable) {
+            "Device setup unavailable"
+        } else if (!setupRequired()) {
+            storedConfiguration?.let { "Ready to connect" } ?: "Not configured"
+        } else {
+            "Device setup required"
+        },
+        setupRequired = setupRequired(),
     )
+
+    fun createDeviceKey(host: String, port: String, certificateFingerprint: String) {
+        val enrollment = requireNotNull(deviceEnrollment) { "Windows device enrollment is unavailable." }
+        val configuration = parseConfiguration(host, port, certificateFingerprint)
+        if (configuration == null) {
+            update(
+                presentation.copy(
+                    emptyStateMessage = "Enter a server address, port, and SHA-256 fingerprint before device setup.",
+                    statusMessage = "Configuration incomplete",
+                ),
+            )
+            return
+        }
+        configurationStore.save(configuration)
+        try {
+            val signer = enrollment.create()
+            update(
+                presentation.copy(
+                    configuration = configuration,
+                    deviceKeyFingerprint = signer.keyFingerprint,
+                    emptyStateMessage = "Export this device public key for the server administrator.",
+                    statusMessage = "Device key created — export public key",
+                    exportRequired = true,
+                    setupRequired = false,
+                ),
+            )
+        } catch (exception: IllegalStateException) {
+            update(
+                presentation.copy(
+                    emptyStateMessage = "Device setup could not be completed. Retry after Windows key storage is available.",
+                    statusMessage = "Device setup failed",
+                ),
+            )
+        }
+    }
 
     fun connect(host: String, port: String, certificateFingerprint: String) {
         val parsedConfiguration = parseConfiguration(host, port, certificateFingerprint)
@@ -180,6 +238,52 @@ class WindowsSynchronizationController(
     }
 
     fun presentation(): WindowsClientPresentation = presentation
+
+    fun exportDevicePublicKey(file: File) {
+        val enrollment = requireNotNull(deviceEnrollment) { "Windows device enrollment is unavailable." }
+        try {
+            enrollment.exportPublicKey(file)
+            update(
+                presentation.copy(
+                    emptyStateMessage = "Give ${file.name} to the server administrator, restart the server, then connect.",
+                    exportRequired = false,
+                    statusMessage = "Public key exported: ${presentation.deviceKeyFingerprint}",
+                ),
+            )
+        } catch (exception: IOException) {
+            update(
+                presentation.copy(
+                    emptyStateMessage = "Public-key export failed. Retry using the same device key.",
+                    exportRequired = true,
+                    statusMessage = "Public-key export failed: ${exception.message}",
+                ),
+            )
+        } catch (exception: IllegalStateException) {
+            update(
+                presentation.copy(
+                    emptyStateMessage = "Public-key export failed. Retry using the same device key.",
+                    exportRequired = true,
+                    statusMessage = "Public-key export failed",
+                ),
+            )
+        }
+    }
+
+    fun resetDeviceSetup() {
+        val enrollment = requireNotNull(deviceEnrollment) { "Windows device enrollment is unavailable." }
+        enrollment.delete()
+        update(
+            presentation.copy(
+                connectionActive = false,
+                deviceKeyFingerprint = null,
+                editability = Editability.READ_ONLY,
+                emptyStateMessage = "Device setup is required before connecting.",
+                exportRequired = false,
+                statusMessage = "Device setup reset",
+                setupRequired = true,
+            ),
+        )
+    }
 
     private fun parseConfiguration(
         host: String,
@@ -276,6 +380,17 @@ class WindowsSynchronizationController(
         presentation = nextPresentation
         stateChanged(nextPresentation)
     }
+
+    private fun deviceKeyFingerprint(): String? =
+        try {
+            deviceEnrollment?.current()?.keyFingerprint
+        } catch (exception: UnreadableDeviceKeyException) {
+            deviceKeyUnreadable = true
+            null
+        }
+
+    private fun setupRequired(): Boolean =
+        !deviceKeyUnreadable && deviceEnrollment != null && deviceKeyFingerprint() == null
 
     companion object {
         private val FINGERPRINT = Regex("^[0-9A-F]{64}$")

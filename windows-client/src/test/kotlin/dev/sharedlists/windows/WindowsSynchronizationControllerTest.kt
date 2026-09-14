@@ -10,6 +10,7 @@ import dev.sharedlists.client.SharedList
 import dev.sharedlists.client.SharedListId
 import dev.sharedlists.client.SharedListsClient
 import dev.sharedlists.client.SynchronizationCursor
+import java.io.File
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.suspendCoroutine
 import kotlin.test.Test
@@ -124,6 +125,26 @@ class WindowsSynchronizationControllerTest {
         assertTrue(client.javaClass.name.endsWith("GrpcSharedListsClient"))
     }
 
+    @Test
+    fun `device setup saves server identity then requests public-key export without connecting`() {
+        val enrollment = InMemoryWindowsDeviceEnrollment()
+        val store = InMemoryServerConfigurationStore()
+        val controller = WindowsSynchronizationController(
+            clientFactory = StaticWindowsClientFactory(DeferredSharedListsClient()),
+            configurationStore = store,
+            deviceEnrollment = enrollment,
+            synchronizationRunner = SynchronizationRunner { block -> block() },
+        )
+
+        controller.createDeviceKey("192.0.2.10", "8443", FINGERPRINT)
+
+        assertEquals("test-key", controller.presentation().deviceKeyFingerprint)
+        assertEquals("Device key created — export public key", controller.presentation().statusMessage)
+        assertTrue(controller.presentation().exportRequired)
+        assertEquals("192.0.2.10", store.load()?.host)
+        assertFalse(enrollment.connected)
+    }
+
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =
         ClientState.Ready(
             enrollment = EnrollmentState.ENROLLED,
@@ -181,6 +202,24 @@ class WindowsSynchronizationControllerTest {
 
         override fun save(configuration: ServerConfiguration) {
             this.configuration = configuration
+        }
+    }
+
+    private class InMemoryWindowsDeviceEnrollment : WindowsDeviceEnrollment {
+        var connected = false
+        private var signer: DeviceSigner? = null
+
+        override fun create(): DeviceSigner =
+            DeferredSharedListsClientSigner.also { signer = it }
+
+        override fun current(): DeviceSigner? = signer
+
+        override fun delete() {
+            signer = null
+        }
+
+        override fun exportPublicKey(file: File) {
+            file.writeText("public key")
         }
     }
 

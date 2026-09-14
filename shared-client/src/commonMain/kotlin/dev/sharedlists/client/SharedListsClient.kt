@@ -42,6 +42,18 @@ data class SharedList(
     val name: String,
 )
 
+data class DurableOperationOutcome(
+    val operationId: OperationId,
+    val outcome: OperationOutcome,
+    val reason: String? = null,
+)
+
+enum class OperationOutcome {
+    APPLIED,
+    IGNORED,
+    REJECTED,
+}
+
 enum class EnrollmentState {
     UNCONFIGURED,
     UNENROLLED,
@@ -63,6 +75,7 @@ sealed interface ClientState {
         val connectivity: ConnectivityState,
         val canonicalState: CanonicalState,
         val cursor: SynchronizationCursor?,
+        val lastOperationOutcome: DurableOperationOutcome? = null,
     ) : ClientState {
         val editingEnabled: Boolean
             get() = enrollment == EnrollmentState.ENROLLED && connectivity == ConnectivityState.LIVE
@@ -78,6 +91,23 @@ sealed interface ClientState {
 interface EditCommand {
     val operationId: OperationId
 }
+
+data class CreateList(
+    override val operationId: OperationId,
+    val listId: SharedListId,
+    val name: String,
+) : EditCommand
+
+data class DeleteList(
+    override val operationId: OperationId,
+    val listId: SharedListId,
+) : EditCommand
+
+data class RenameList(
+    override val operationId: OperationId,
+    val listId: SharedListId,
+    val name: String,
+) : EditCommand
 
 interface SharedListsClient {
     suspend fun synchronize(): ClientState

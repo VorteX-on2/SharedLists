@@ -3,11 +3,17 @@ package dev.sharedlists.server
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
+import dev.sharedlists.client.CreateList
 import dev.sharedlists.client.DeviceSigner
+import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.GrpcSharedListsClient
+import dev.sharedlists.client.OperationId
+import dev.sharedlists.client.OperationOutcome
+import dev.sharedlists.client.RenameList
 import dev.sharedlists.client.ServerEndpoint
+import dev.sharedlists.client.SharedListId
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.file.Files
@@ -58,9 +64,48 @@ class RealServerAcceptanceTest {
         }
     }
 
+    @Test
+    fun `enrolled clients receive durable shared-list lifecycle effects`() {
+        TemporaryServerInstallation().use { fixture ->
+            fixture.start()
+            val first = fixture.client(0)
+            val second = fixture.client(1)
+            val listId = SharedListId.parse("11111111-1111-4111-8111-111111111111")
+
+            first.synchronizeBlocking()
+            assertEquals(
+                OperationOutcome.APPLIED,
+                first.submitBlocking(
+                    CreateList(
+                        operationId = OperationId.parse("21111111-1111-4111-8111-111111111111"),
+                        listId = listId,
+                        name = "  Groceries  ",
+                    ),
+                ).lastOperationOutcome?.outcome,
+            )
+            assertEquals(listOf("Groceries"), second.synchronizeBlocking().canonicalState.lists.map { it.name })
+            assertEquals(
+                OperationOutcome.APPLIED,
+                first.submitBlocking(
+                    RenameList(
+                        operationId = OperationId.parse("31111111-1111-4111-8111-111111111111"),
+                        listId = listId,
+                        name = "Kitchen",
+                    ),
+                ).lastOperationOutcome?.outcome,
+            )
+            assertEquals(listOf("Kitchen"), second.synchronizeBlocking().canonicalState.lists.map { it.name })
+        }
+    }
+
     private fun GrpcSharedListsClient.synchronizeBlocking(): ClientState.Ready =
         runBlocking {
             synchronize() as ClientState.Ready
+        }
+
+    private fun GrpcSharedListsClient.submitBlocking(command: EditCommand): ClientState.Ready =
+        runBlocking {
+            submit(command) as ClientState.Ready
         }
 }
 
@@ -69,7 +114,7 @@ private class TemporaryServerInstallation : AutoCloseable {
     private val distribution = directory.resolve("server")
     private val port = ServerSocket(0).use { socket -> socket.localPort }
     private val processOutput = StringBuilder()
-    private val deviceSigner = TestDeviceSigner.create()
+    private val deviceSigners = listOf(TestDeviceSigner.create(), TestDeviceSigner.create())
     private var process: Process? = null
 
     val certificateFile: Path = directory.resolve("data/tls/server.pem")
@@ -80,7 +125,9 @@ private class TemporaryServerInstallation : AutoCloseable {
         copyDistribution()
         directory.resolve("data/authorized-devices").also { authorizedDevicesDirectory ->
             Files.createDirectories(authorizedDevicesDirectory)
-            deviceSigner.writePublicKeyPem(authorizedDevicesDirectory.resolve("fixture.pem"))
+            deviceSigners.forEachIndexed { index, signer ->
+                signer.writePublicKeyPem(authorizedDevicesDirectory.resolve("fixture-$index.pem"))
+            }
         }
         directory.resolve("sharedlists.properties").writeText(
             """
@@ -102,11 +149,11 @@ private class TemporaryServerInstallation : AutoCloseable {
             .joinToString(":") { byte -> "%02X".format(byte) }
     }
 
-    fun client(): GrpcSharedListsClient =
+    fun client(index: Int = 0): GrpcSharedListsClient =
         GrpcSharedListsClient(
             endpoint = ServerEndpoint("127.0.0.1", port, certificateFingerprint()),
-            deviceSigner = deviceSigner,
-            stateStore = FileClientStateStore(directory.resolve("client-state.properties").toFile()),
+            deviceSigner = deviceSigners[index],
+            stateStore = FileClientStateStore(directory.resolve("client-state-$index.properties").toFile()),
         )
 
     fun restart() {

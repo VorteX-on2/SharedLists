@@ -10,6 +10,7 @@ import dev.sharedlists.protocol.RenameList
 import dev.sharedlists.protocol.SetMarked
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.DriverManager
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -119,17 +120,54 @@ class SqliteCanonicalStoreTest {
         }
     }
 
-    private fun createItem(operationId: String, listId: String, itemId: String, text: String): ClientOperation =
-        ClientOperation.newBuilder().setOperationId(operationId)
-            .setCreateItem(CreateItem.newBuilder().setListId(listId).setItemId(itemId).setText(text)).build()
+    @Test
+    fun `upgrades an existing operation journal for marked outcomes`() {
+        val directory = Files.createTempDirectory("sharedlists-store-upgrade-")
+        val database = directory.resolve("sharedlists.db")
+        try {
+            DriverManager.getConnection("jdbc:sqlite:${database.toAbsolutePath()}").use { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute(
+                        """
+                        CREATE TABLE operation_journal (
+                            revision INTEGER PRIMARY KEY,
+                            operation_id TEXT NOT NULL UNIQUE,
+                            request_fingerprint TEXT NOT NULL,
+                            operation_type INTEGER NOT NULL,
+                            list_id TEXT NOT NULL,
+                            list_name TEXT NOT NULL,
+                            item_id TEXT NOT NULL,
+                            item_text TEXT NOT NULL,
+                            outcome INTEGER NOT NULL
+                        )
+                        """.trimIndent(),
+                    )
+                }
+            }
+
+            SqliteCanonicalStore(database).use { store ->
+                assertEquals(0, store.snapshot().revision)
+            }
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
 
     private fun create(operationId: String, listId: String, name: String): ClientOperation =
         ClientOperation.newBuilder().setOperationId(operationId)
             .setCreateList(CreateList.newBuilder().setListId(listId).setName(name)).build()
 
+    private fun createItem(operationId: String, listId: String, itemId: String, text: String): ClientOperation =
+        ClientOperation.newBuilder().setOperationId(operationId)
+            .setCreateItem(CreateItem.newBuilder().setListId(listId).setItemId(itemId).setText(text)).build()
+
     private fun delete(operationId: String, listId: String): ClientOperation =
         ClientOperation.newBuilder().setOperationId(operationId)
             .setDeleteList(DeleteList.newBuilder().setListId(listId)).build()
+
+    private fun deleteItem(operationId: String, listId: String, itemId: String): ClientOperation =
+        ClientOperation.newBuilder().setOperationId(operationId)
+            .setDeleteItem(DeleteItem.newBuilder().setListId(listId).setItemId(itemId)).build()
 
     private fun rename(operationId: String, listId: String, name: String): ClientOperation =
         ClientOperation.newBuilder().setOperationId(operationId)
@@ -138,10 +176,6 @@ class SqliteCanonicalStoreTest {
     private fun setMarked(operationId: String, listId: String, itemId: String, value: Boolean): ClientOperation =
         ClientOperation.newBuilder().setOperationId(operationId)
             .setSetMarked(SetMarked.newBuilder().setListId(listId).setItemId(itemId).setValue(value)).build()
-
-    private fun deleteItem(operationId: String, listId: String, itemId: String): ClientOperation =
-        ClientOperation.newBuilder().setOperationId(operationId)
-            .setDeleteItem(DeleteItem.newBuilder().setListId(listId).setItemId(itemId)).build()
 }
 
 private class StoreFixture : AutoCloseable {

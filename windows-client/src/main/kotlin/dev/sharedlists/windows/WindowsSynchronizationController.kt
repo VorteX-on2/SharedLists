@@ -13,6 +13,7 @@ import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.GrpcSharedListsClient
+import dev.sharedlists.client.ListItem
 import dev.sharedlists.client.ListItemId
 import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
@@ -44,6 +45,21 @@ data class WindowsListRow(
     val name: String,
 ) {
     override fun toString(): String = name
+}
+
+data class WindowsListCard(
+    val id: SharedListId,
+    val name: String,
+    val unmarkedItems: List<ListItem>,
+) {
+    override fun toString(): String =
+        buildString {
+            append(name)
+            unmarkedItems.forEach { item ->
+                append("\n- ")
+                append(item.text)
+            }
+        }
 }
 
 interface WindowsDeviceSignerProvider {
@@ -125,6 +141,7 @@ data class WindowsClientPresentation(
     val editability: Editability,
     val emptyStateMessage: String?,
     val exportRequired: Boolean = false,
+    val cards: List<WindowsListCard> = emptyList(),
     val lists: List<String>,
     val sharedLists: List<WindowsListRow> = emptyList(),
     val statusMessage: String?,
@@ -300,14 +317,6 @@ class WindowsSynchronizationController(
         submit(newText, ITEM_TEXT_LIMIT) { operationId -> EditItemText(itemId, list.id, operationId, newText) }
     }
 
-    fun setItemMarked(listId: SharedListId, itemId: ListItemId, value: Boolean) {
-        val list = cachedState.lists.firstOrNull { it.id == listId } ?: return
-        if (list.items.none { it.id == itemId }) {
-            return
-        }
-        submit(null) { operationId -> SetMarked(itemId, list.id, operationId, value) }
-    }
-
     fun items(listId: SharedListId) = cachedState.lists.firstOrNull { it.id == listId }?.items.orEmpty()
 
     fun observePresentation(observer: (WindowsClientPresentation) -> Unit) {
@@ -338,6 +347,14 @@ class WindowsSynchronizationController(
                 unreadableDeviceKey = deviceKeyUnreadable,
             ),
         )
+    }
+
+    fun setItemMarked(listId: SharedListId, itemId: ListItemId, value: Boolean) {
+        val list = cachedState.lists.firstOrNull { it.id == listId } ?: return
+        if (list.items.none { it.id == itemId }) {
+            return
+        }
+        submit(null) { operationId -> SetMarked(itemId, list.id, operationId, value) }
     }
 
     fun exportDevicePublicKey(file: File) {
@@ -414,6 +431,7 @@ class WindowsSynchronizationController(
                 emptyStateMessage = if (cachedState.lists.isEmpty()) "Unable to synchronize shared lists." else null,
                 lists = cachedState.lists.map { list -> list.name },
                 sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
+                cards = cards(),
                 statusMessage = "Disconnected — retry when the server is available",
             ),
         )
@@ -427,6 +445,7 @@ class WindowsSynchronizationController(
                 emptyStateMessage = failureMessage(enrollment),
                 lists = cachedState.lists.map { list -> list.name },
                 sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
+                cards = cards(),
                 statusMessage = "Synchronization unavailable",
             ),
         )
@@ -442,6 +461,7 @@ class WindowsSynchronizationController(
                 emptyStateMessage = emptyStateMessage(clientState, isLive),
                 lists = cachedState.lists.map { list -> list.name },
                 sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
+                cards = cards(),
                 statusMessage = statusMessage(clientState, isLive),
             ),
         )
@@ -463,6 +483,15 @@ class WindowsSynchronizationController(
     private fun newItemId(): ListItemId = ListItemId.parse(UUID.randomUUID().toString())
 
     private fun newOperationId(): OperationId = OperationId.parse(UUID.randomUUID().toString())
+
+    private fun cards(): List<WindowsListCard> =
+        cachedState.lists.map { list ->
+            WindowsListCard(
+                id = list.id,
+                name = list.name,
+                unmarkedItems = list.items.filterNot { item -> item.marked }.take(MAXIMUM_CARD_ITEMS),
+            )
+        }
 
     private fun emptyStateMessage(clientState: ClientState.Ready, isLive: Boolean): String? =
         when {
@@ -555,6 +584,7 @@ class WindowsSynchronizationController(
     companion object {
         private const val ITEM_TEXT_LIMIT = 500
         private const val LIST_NAME_LIMIT = 100
+        private const val MAXIMUM_CARD_ITEMS = 4
         private val FINGERPRINT = Regex("^[0-9A-F]{64}$")
     }
 }

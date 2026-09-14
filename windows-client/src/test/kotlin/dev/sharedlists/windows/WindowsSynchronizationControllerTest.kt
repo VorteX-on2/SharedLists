@@ -199,6 +199,33 @@ class WindowsSynchronizationControllerTest {
         assertEquals(false, controller.items(list.id).single().marked)
     }
 
+    @Test
+    fun `card presentation previews at most four unmarked items`() {
+        val list = SharedList(
+            id = SharedListId.parse("a0000000-0000-4000-8000-000000000001"),
+            name = "Groceries",
+            items = (1..6).map { index ->
+                ListItem(
+                    id = ListItemId.parse("b0000000-0000-4000-8000-00000000000$index"),
+                    marked = index == 1,
+                    text = "Item $index",
+                )
+            },
+        )
+        val facade = CapturingSharedListsClient(liveState(CanonicalState(listOf(list))))
+        val controller = controller(facade, InMemoryServerConfigurationStore())
+
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+
+        assertEquals(listOf("Item 2", "Item 3", "Item 4", "Item 5"), controller.presentation().cards.single().unmarkedItems.map { it.text })
+    }
+
+    @Test
+    fun `layout mode uses the wide breakpoint`() {
+        assertEquals(WindowsLayoutMode.NARROW, WindowsLayoutMode.forWidth(839))
+        assertEquals(WindowsLayoutMode.WIDE, WindowsLayoutMode.forWidth(840))
+    }
+
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =
         ClientState.Ready(
             enrollment = EnrollmentState.ENROLLED,

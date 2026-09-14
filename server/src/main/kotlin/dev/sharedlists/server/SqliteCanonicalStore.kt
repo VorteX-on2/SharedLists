@@ -101,6 +101,9 @@ internal class SqliteCanonicalStore(
                 )
                 """.trimIndent(),
             )
+            if (!operationJournalColumns().contains("marked_value")) {
+                statement.execute("ALTER TABLE operation_journal ADD COLUMN marked_value INTEGER NOT NULL DEFAULT 0")
+            }
         }
 
         connection.prepareStatement(
@@ -546,6 +549,17 @@ internal class SqliteCanonicalStore(
         connection.prepareStatement(query).use { statement ->
             statement.setString(1, value)
             statement.executeQuery().use { it.next() }
+        }
+
+    private fun operationJournalColumns(): Set<String> =
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info(operation_journal)").use { result ->
+                buildSet {
+                    while (result.next()) {
+                        add(result.getString("name"))
+                    }
+                }
+            }
         }
 
     private fun java.sql.ResultSet.journalEntry(): JournalEntry {

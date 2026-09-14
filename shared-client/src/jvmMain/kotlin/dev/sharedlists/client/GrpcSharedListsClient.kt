@@ -261,6 +261,7 @@ private object OperationCodec {
 }
 
 class GrpcSharedListsClient(
+    private val channelFactory: (ServerEndpoint) -> io.grpc.ManagedChannel = ::nettyChannel,
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
@@ -273,12 +274,7 @@ class GrpcSharedListsClient(
 
     override suspend fun synchronize(): ClientState {
         activeSession?.close()
-        val channel = NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
-            .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
-            .keepAliveTime(30, TimeUnit.SECONDS)
-            .keepAliveTimeout(10, TimeUnit.SECONDS)
-            .keepAliveWithoutCalls(true)
-            .build()
+        val channel = channelFactory(endpoint)
         try {
             val unauthenticatedStub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
             val challenge = unauthenticatedStub.getChallenge(
@@ -768,6 +764,14 @@ private class PinnedTrustManager(
 
     override fun engineInit(keyStore: KeyStore?) = Unit
 }
+
+private fun nettyChannel(endpoint: ServerEndpoint): io.grpc.ManagedChannel =
+    NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
+        .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
+        .keepAliveTime(30, TimeUnit.SECONDS)
+        .keepAliveTimeout(10, TimeUnit.SECONDS)
+        .keepAliveWithoutCalls(true)
+        .build()
 
 interface DeviceSigner {
     val keyFingerprint: String

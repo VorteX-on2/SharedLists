@@ -243,6 +243,7 @@ class AndroidSynchronizationController(
         retryJob?.cancel()
         cancelClient()
         val nextClient = GrpcSharedListsClient(
+            channelFactory = AndroidPinnedChannelFactory()::create,
             deviceSigner = signer,
             endpoint = ServerEndpoint(configuration.host, configuration.port, configuration.certificateFingerprint),
             stateStore = FileClientStateStore(stateFile),

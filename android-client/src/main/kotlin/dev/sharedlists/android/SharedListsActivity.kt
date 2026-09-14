@@ -1,6 +1,7 @@
 package dev.sharedlists.android
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -73,6 +74,7 @@ class SharedListsActivity : Activity() {
             if (presentation.exportRequired) addButton("Export public key", ::sharePublicKey)
             if (presentation.enrollment == EnrollmentState.ENROLLED) {
                 addLists(presentation.canonicalState.lists)
+                if (presentation.editingEnabled) addButton("Create shared list") { prompt("New shared list") { controller.createList(it) } }
                 addButton("Reset local synchronization data", controller::resetLocalData)
                 addButton("Reset device setup", controller::resetDeviceSetup)
             }
@@ -99,9 +101,70 @@ class SharedListsActivity : Activity() {
             return
         }
         lists.forEach { list ->
-            addText(list.name)
-            list.items.take(4).forEach { item -> addText(if (item.marked) "✓ ${item.text}" else item.text) }
+            addButton(list.name) { showList(list) }
+            list.items.filterNot { it.marked }.take(4).forEach { item -> addText(item.text) }
         }
+    }
+
+    private fun showList(list: SharedList) {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 16, 32, 16)
+        }
+        container.addView(TextView(this).apply { text = list.name; textSize = 22f })
+        container.addView(Button(this).apply {
+            text = "Rename list"
+            setOnClickListener { prompt("Rename shared list", list.name) { controller.renameList(list.id, it) } }
+        })
+        container.addView(Button(this).apply {
+            text = "Add item"
+            setOnClickListener { prompt("New item") { controller.createItem(list.id, it) } }
+        })
+        list.items.forEachIndexed { index, item ->
+            container.addView(Button(this).apply {
+                text = if (item.marked) "✓ ${item.text}" else item.text
+                contentDescription = "Edit ${item.text}"
+                setOnClickListener { prompt("Edit item", item.text) { controller.editItemText(list.id, item.id, it) } }
+            })
+            container.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(Button(this@SharedListsActivity).apply {
+                    text = if (item.marked) "Unmark" else "Mark"
+                    setOnClickListener { controller.setMarked(list.id, item.id, !item.marked) }
+                })
+                addView(Button(this@SharedListsActivity).apply {
+                    text = "Up"
+                    isEnabled = index > 0
+                    setOnClickListener { controller.moveItem(list.id, item.id, index - 1) }
+                })
+                addView(Button(this@SharedListsActivity).apply {
+                    text = "Down"
+                    isEnabled = index < list.items.lastIndex
+                    setOnClickListener { controller.moveItem(list.id, item.id, index + 1) }
+                })
+                addView(Button(this@SharedListsActivity).apply {
+                    text = "Delete"
+                    setOnClickListener { controller.deleteItem(list.id, item.id) }
+                })
+            })
+        }
+        container.addView(Button(this).apply {
+            text = "Delete list"
+            setOnClickListener {
+                AlertDialog.Builder(this@SharedListsActivity)
+                    .setMessage("Delete ${list.name}?")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Delete") { _, _ -> controller.deleteList(list.id) }
+                    .show()
+            }
+        })
+        AlertDialog.Builder(this).setView(ScrollView(this).apply { addView(container) }).setNegativeButton("Close", null).show()
+    }
+
+    private fun prompt(title: String, initialValue: String = "", action: (String) -> Unit) {
+        val input = EditText(this).apply { setText(initialValue); selectAll() }
+        AlertDialog.Builder(this).setTitle(title).setView(input).setNegativeButton("Cancel", null)
+            .setPositiveButton("Save") { _, _ -> action(input.text.toString()) }.show()
     }
 
     private fun addButton(label: String, action: () -> Unit) {

@@ -6,15 +6,28 @@ import dev.sharedlists.client.CachedSharedListsClient
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
+import dev.sharedlists.client.CreateItem
+import dev.sharedlists.client.CreateList
+import dev.sharedlists.client.DeleteItem
+import dev.sharedlists.client.DeleteList
+import dev.sharedlists.client.EditCommand
+import dev.sharedlists.client.EditItemText
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.ForegroundSharedListsClient
 import dev.sharedlists.client.GrpcSharedListsClient
 import dev.sharedlists.client.LocalStateResettableClient
 import dev.sharedlists.client.ObservableSharedListsClient
+import dev.sharedlists.client.ListItemId
+import dev.sharedlists.client.MoveItem
+import dev.sharedlists.client.OperationId
+import dev.sharedlists.client.RenameList
 import dev.sharedlists.client.ServerEndpoint
 import dev.sharedlists.client.SharedListsClient
+import dev.sharedlists.client.SharedListId
+import dev.sharedlists.client.SetMarked
 import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -103,6 +116,30 @@ class AndroidSynchronizationController(
         publish()
     }
 
+    fun createItem(listId: SharedListId, text: String) {
+        submit(text, ITEM_TEXT_LIMIT) { operationId ->
+            CreateItem(ListItemId.parse(UUID.randomUUID().toString()), listId, operationId, text.trim())
+        }
+    }
+
+    fun createList(name: String) {
+        submit(name, LIST_NAME_LIMIT) { operationId ->
+            CreateList(operationId, SharedListId.parse(UUID.randomUUID().toString()), name.trim())
+        }
+    }
+
+    fun deleteItem(listId: SharedListId, itemId: ListItemId) {
+        submit { operationId -> DeleteItem(itemId, listId, operationId) }
+    }
+
+    fun deleteList(listId: SharedListId) {
+        submit { operationId -> DeleteList(operationId, listId) }
+    }
+
+    fun editItemText(listId: SharedListId, itemId: ListItemId, text: String) {
+        submit(text, ITEM_TEXT_LIMIT) { operationId -> EditItemText(itemId, listId, operationId, text.trim()) }
+    }
+
     fun exportPublicKey(): Pair<String, String> {
         val signer = requireNotNull(enrollment.current()) { "Create a device key before exporting it." }
         presentation = presentation.copy(exportRequired = false, status = "Public key ready to share with the administrator.")
@@ -137,6 +174,19 @@ class AndroidSynchronizationController(
         }
     }
 
+    fun moveItem(listId: SharedListId, itemId: ListItemId, destinationIndex: Int) {
+        val items = presentation.canonicalState.lists.firstOrNull { it.id == listId }?.items ?: return
+        val remaining = items.filterNot { it.id == itemId }
+        val index = destinationIndex.coerceIn(0, remaining.size)
+        submit { operationId ->
+            MoveItem(itemId, listId, operationId, remaining.getOrNull(index - 1)?.id, remaining.getOrNull(index)?.id)
+        }
+    }
+
+    fun renameList(listId: SharedListId, name: String) {
+        submit(name, LIST_NAME_LIMIT) { operationId -> RenameList(operationId, listId, name.trim()) }
+    }
+
     fun resetLocalData() {
         (client as? LocalStateResettableClient)?.resetLocalState()
         presentation = presentation.copy(canonicalState = CanonicalState(), editingEnabled = false, status = "Local synchronization data reset.")
@@ -155,6 +205,10 @@ class AndroidSynchronizationController(
         refreshEnrollment()
         publish()
         startIfEligible()
+    }
+
+    fun setMarked(listId: SharedListId, itemId: ListItemId, value: Boolean) {
+        submit { operationId -> SetMarked(itemId, listId, operationId, value) }
     }
 
     private fun cancelClient() {
@@ -216,6 +270,34 @@ class AndroidSynchronizationController(
         }
     }
 
+    private fun submit(command: (OperationId) -> EditCommand) {
+        submit(null, 0, command)
+    }
+
+    private fun submit(text: String?, maximumLength: Int, command: (OperationId) -> EditCommand) {
+        val liveClient = client
+        if (!presentation.editingEnabled || liveClient == null) {
+            presentation = presentation.copy(status = "Editing is available only while synchronized.")
+            publish()
+            return
+        }
+        if (text != null && (text.trim().isEmpty() || text.trim().codePointCount(0, text.trim().length) > maximumLength)) {
+            presentation = presentation.copy(status = "Enter text within the allowed length.")
+            publish()
+            return
+        }
+        presentation = presentation.copy(editingEnabled = false, status = "Saving…")
+        publish()
+        scope.launch {
+            try {
+                showState(liveClient.submit(command(OperationId.parse(UUID.randomUUID().toString()))))
+            } catch (exception: Exception) {
+                presentation = presentation.copy(editingEnabled = false, status = "Unable to save change.")
+                publish()
+            }
+        }
+    }
+
     private fun showState(state: ClientState) {
         if (state !is ClientState.Ready) {
             presentation = presentation.copy(editingEnabled = false, status = "Device enrollment is required.")
@@ -263,6 +345,8 @@ class AndroidSynchronizationController(
     }
 
     private companion object {
+        const val ITEM_TEXT_LIMIT = 500
+        const val LIST_NAME_LIMIT = 100
         const val RETRY_DELAY_MILLIS = 5_000L
         val FINGERPRINT_PATTERN = Regex("^[0-9A-F]{64}$")
     }

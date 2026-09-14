@@ -3,13 +3,17 @@ package dev.sharedlists.server
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
+import dev.sharedlists.client.CreateItem
 import dev.sharedlists.client.CreateList
+import dev.sharedlists.client.DeleteItem
 import dev.sharedlists.client.DeleteList
 import dev.sharedlists.client.DeviceSigner
+import dev.sharedlists.client.EditItemText
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.GrpcSharedListsClient
+import dev.sharedlists.client.ListItemId
 import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
 import dev.sharedlists.client.RenameList
@@ -31,6 +35,7 @@ import kotlin.io.path.inputStream
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
@@ -120,6 +125,112 @@ class RealServerAcceptanceTest {
             assertEquals(emptyList(), fixture.client(1).synchronizeBlocking().canonicalState.lists)
         }
     }
+
+    @Test
+    fun `real clients persist item lifecycle, duplicate text, and terminal deletion`() {
+        TemporaryServerInstallation().use { fixture ->
+                fixture.start()
+                val first = fixture.client(0)
+                val second = fixture.client(1)
+                val listId = SharedListId.parse("61111111-1111-4111-8111-111111111111")
+                val firstItemId = ListItemId.parse("71111111-1111-4111-8111-111111111111")
+                val secondItemId = ListItemId.parse("81111111-1111-4111-8111-111111111111")
+
+                first.synchronizeBlocking()
+                first.submitBlocking(
+                    CreateList(
+                        operationId = OperationId.parse("91111111-1111-4111-8111-111111111111"),
+                        listId = listId,
+                        name = "Groceries",
+                    ),
+                )
+                assertEquals(
+                    OperationOutcome.REJECTED,
+                    first.submitBlocking(invalidItem()).lastOperationOutcome?.outcome,
+                )
+                assertEquals(
+                    OperationOutcome.APPLIED,
+                    first.submitBlocking(firstItem()).lastOperationOutcome?.outcome,
+                )
+                assertEquals(OperationOutcome.APPLIED, first.submitBlocking(firstItem()).lastOperationOutcome?.outcome)
+                first.submitBlocking(
+                    CreateItem(
+                        operationId = OperationId.parse("b1111111-1111-4111-8111-111111111111"),
+                        itemId = secondItemId,
+                        listId = listId,
+                        text = "Milk",
+                    ),
+                )
+                assertEquals(
+                    listOf("Milk", "Milk"),
+                    second.synchronizeBlocking().canonicalState.lists.single().items.map { it.text },
+                )
+                first.submitBlocking(
+                    EditItemText(
+                        operationId = OperationId.parse("c1111111-1111-4111-8111-111111111111"),
+                        itemId = firstItemId,
+                        listId = listId,
+                        text = "Oat milk",
+                    ),
+                )
+                assertEquals(
+                    OperationOutcome.APPLIED,
+                    first.submitBlocking(
+                        DeleteItem(
+                            operationId = OperationId.parse("d1111111-1111-4111-8111-111111111111"),
+                            itemId = firstItemId,
+                            listId = listId,
+                        ),
+                    ).lastOperationOutcome?.outcome,
+                )
+                assertEquals(
+                    listOf("Milk"),
+                    second.synchronizeBlocking().canonicalState.lists.single().items.map { it.text },
+                )
+                assertEquals(
+                    OperationOutcome.IGNORED,
+                    first.submitBlocking(
+                        EditItemText(
+                            operationId = OperationId.parse("e1111111-1111-4111-8111-111111111111"),
+                            itemId = firstItemId,
+                            listId = listId,
+                            text = "Resurrected",
+                        ),
+                    ).lastOperationOutcome?.outcome,
+                )
+                assertFailsWith<Exception> {
+                    first.submitBlocking(
+                        CreateItem(
+                            itemId = ListItemId.parse("f3111111-1111-4111-8111-111111111111"),
+                            listId = listId,
+                            operationId = OperationId.parse("a1111111-1111-4111-8111-111111111111"),
+                            text = "Mismatch",
+                        ),
+                    )
+                }
+                fixture.restart()
+                assertEquals(
+                    listOf("Milk"),
+                    fixture.client(1).synchronizeBlocking().canonicalState.lists.single().items.map { it.text },
+                )
+        }
+    }
+
+    private fun firstItem(): CreateItem =
+        CreateItem(
+            operationId = OperationId.parse("a1111111-1111-4111-8111-111111111111"),
+            itemId = ListItemId.parse("71111111-1111-4111-8111-111111111111"),
+            listId = SharedListId.parse("61111111-1111-4111-8111-111111111111"),
+            text = "Milk",
+        )
+
+    private fun invalidItem(): CreateItem =
+        CreateItem(
+            operationId = OperationId.parse("f1111111-1111-4111-8111-111111111111"),
+            itemId = ListItemId.parse("f2111111-1111-4111-8111-111111111111"),
+            listId = SharedListId.parse("61111111-1111-4111-8111-111111111111"),
+            text = "x".repeat(501),
+        )
 
     private fun GrpcSharedListsClient.synchronizeBlocking(): ClientState.Ready =
         runBlocking {

@@ -3,9 +3,12 @@ package dev.sharedlists.windows
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
+import dev.sharedlists.client.CreateItem
 import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
+import dev.sharedlists.client.ListItem
+import dev.sharedlists.client.ListItemId
 import dev.sharedlists.client.SharedList
 import dev.sharedlists.client.SharedListId
 import dev.sharedlists.client.SharedListsClient
@@ -145,6 +148,33 @@ class WindowsSynchronizationControllerTest {
         assertFalse(enrollment.connected)
     }
 
+    @Test
+    fun `item presentation validates text and submits duplicate items through the public facade`() {
+        val list = SharedList(
+            id = SharedListId.parse("a0000000-0000-4000-8000-000000000001"),
+            name = "Groceries",
+            items = listOf(
+                ListItem(
+                    id = ListItemId.parse("b0000000-0000-4000-8000-000000000001"),
+                    text = "Milk",
+                ),
+            ),
+        )
+        val facade = CapturingSharedListsClient(liveState(CanonicalState(listOf(list))))
+        val controller = controller(facade, InMemoryServerConfigurationStore())
+
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+        controller.createItem(list.id, "x".repeat(501))
+
+        assertEquals("Enter item text of at most 500 characters.", controller.presentation().statusMessage)
+        assertTrue(facade.commands.isEmpty())
+
+        controller.createItem(list.id, "Milk")
+
+        assertTrue(facade.commands.single() is CreateItem)
+        assertEquals(listOf("Milk"), controller.items(list.id).map { it.text })
+    }
+
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =
         ClientState.Ready(
             enrollment = EnrollmentState.ENROLLED,
@@ -178,6 +208,19 @@ class WindowsSynchronizationControllerTest {
 
         override suspend fun synchronize(): ClientState =
             suspendCoroutine { continuation = it }
+    }
+
+    private class CapturingSharedListsClient(
+        private val state: ClientState,
+    ) : SharedListsClient {
+        val commands = mutableListOf<EditCommand>()
+
+        override suspend fun submit(command: EditCommand): ClientState {
+            commands += command
+            return state
+        }
+
+        override suspend fun synchronize(): ClientState = state
     }
 
     private class StaticWindowsClientFactory(

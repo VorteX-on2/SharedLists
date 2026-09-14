@@ -107,8 +107,8 @@ internal class SharedListsService(
                                 requireRequest(lastAcknowledgedRevision == lastDeliveredRevision)
                                 try {
                                     val entry = store.submit(event.request.submitOperation.operation)
+                                    send(journal(generation, entry))
                                     if (entry.revision > lastDeliveredRevision) {
-                                        send(journal(generation, entry))
                                         lastDeliveredRevision = entry.revision
                                     }
                                 } catch (exception: OperationIdReuseException) {

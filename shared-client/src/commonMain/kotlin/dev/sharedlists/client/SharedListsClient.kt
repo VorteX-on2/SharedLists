@@ -20,6 +20,15 @@ value class OperationId private constructor(
     }
 }
 
+@JvmInline
+value class ListItemId private constructor(
+    val value: String,
+) {
+    companion object {
+        fun parse(value: String): ListItemId = ListItemId(requireUuidV4(value))
+    }
+}
+
 private fun requireUuidV4(value: String): String {
     require(UUID_V4.matches(value)) { "Expected a canonical UUIDv4." }
     return value
@@ -39,7 +48,19 @@ data class CanonicalState(
 
 data class SharedList(
     val id: SharedListId,
+    val items: List<ListItem> = emptyList(),
     val name: String,
+) {
+    constructor(
+        id: SharedListId,
+        name: String,
+    ) : this(id, emptyList(), name)
+}
+
+data class ListItem(
+    val id: ListItemId,
+    val marked: Boolean = false,
+    val text: String,
 )
 
 data class DurableOperationOutcome(
@@ -107,6 +128,26 @@ data class RenameList(
     override val operationId: OperationId,
     val listId: SharedListId,
     val name: String,
+) : EditCommand
+
+data class CreateItem(
+    val itemId: ListItemId,
+    val listId: SharedListId,
+    override val operationId: OperationId,
+    val text: String,
+) : EditCommand
+
+data class DeleteItem(
+    val itemId: ListItemId,
+    val listId: SharedListId,
+    override val operationId: OperationId,
+) : EditCommand
+
+data class EditItemText(
+    val itemId: ListItemId,
+    val listId: SharedListId,
+    override val operationId: OperationId,
+    val text: String,
 ) : EditCommand
 
 interface SharedListsClient {

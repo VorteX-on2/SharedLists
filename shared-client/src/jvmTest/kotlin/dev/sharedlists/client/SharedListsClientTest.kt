@@ -24,7 +24,18 @@ class SharedListsClientTest {
         val directory = Files.createTempDirectory("sharedlists-client-state-")
         val file = directory.resolve("state.properties").toFile()
         val expectedState = CanonicalState(
-            listOf(SharedList(SharedListId.parse("11111111-1111-4111-8111-111111111111"), "Groceries")),
+            listOf(
+                SharedList(
+                    id = SharedListId.parse("11111111-1111-4111-8111-111111111111"),
+                    name = "Groceries",
+                    items = listOf(
+                        ListItem(
+                            id = ListItemId.parse("21111111-1111-4111-8111-111111111111"),
+                            text = "Milk",
+                        ),
+                    ),
+                ),
+            ),
         )
         val expectedCursor = SynchronizationCursor("test-generation", 7)
 

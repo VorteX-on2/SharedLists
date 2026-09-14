@@ -44,6 +44,43 @@ import kotlinx.coroutines.runBlocking
 
 class RealServerAcceptanceTest {
     @Test
+    fun `process rejects invalid configuration before serving`() {
+        TemporaryServerInstallation().use { fixture ->
+            fixture.writeConfiguration("unsupportedSetting=value")
+
+            assertTrue(fixture.startFails())
+            assertTrue(fixture.output().contains("Unknown configuration settings: unsupportedSetting"))
+        }
+    }
+
+    @Test
+    fun `stopped whole-installation restore and rollback preserve identity and canonical state`() {
+        TemporaryServerInstallation().use { fixture ->
+            fixture.start()
+            val client = fixture.client()
+            val listId = SharedListId.parse("11111111-1111-4111-8111-111111111111")
+            client.synchronizeBlocking()
+            client.submitBlocking(
+                CreateList(
+                    operationId = OperationId.parse("21111111-1111-4111-8111-111111111111"),
+                    listId = listId,
+                    name = "Groceries",
+                ),
+            )
+            val fingerprint = fixture.certificateFingerprint()
+            val backup = fixture.backup()
+
+            fixture.replaceJarWithInvalidFile()
+            assertTrue(fixture.startFails())
+            fixture.restore(backup)
+            fixture.start()
+
+            assertEquals(fingerprint, fixture.certificateFingerprint())
+            assertEquals(listOf("Groceries"), fixture.client().synchronizeBlocking().canonicalState.lists.map { it.name })
+        }
+    }
+
+    @Test
     fun `real server reaches durable empty live canonical state`() {
         TemporaryServerInstallation().use { fixture ->
             fixture.start()
@@ -342,6 +379,7 @@ private class TemporaryServerInstallation : AutoCloseable {
     private val port = ServerSocket(0).use { socket -> socket.localPort }
     private val processOutput = StringBuilder()
     private val deviceSigners = listOf(TestDeviceSigner.create(), TestDeviceSigner.create())
+    private val backups = mutableListOf<Path>()
     private var process: Process? = null
 
     val certificateFile: Path = directory.resolve("data/tls/server.pem")
@@ -388,17 +426,34 @@ private class TemporaryServerInstallation : AutoCloseable {
         start()
     }
 
+    fun backup(): Path {
+        stop()
+        return Files.createTempDirectory("sharedlists-backup-").also { backup ->
+            backups.add(backup)
+            copyTree(directory, backup)
+        }
+    }
+
+    fun replaceJarWithInvalidFile() {
+        Files.writeString(distribution.resolve("sharedlists-server.jar"), "not a JAR")
+    }
+
+    fun restore(backup: Path) {
+        stop()
+        directory.toFile().deleteRecursively()
+        copyTree(backup, directory)
+    }
+
     fun start() {
         check(process == null) { "Server process is already running." }
         synchronized(processOutput) {
             processOutput.setLength(0)
         }
-        check(Files.isDirectory(distribution.resolve("lib"))) { "Server distribution is missing: $distribution" }
+        check(Files.isRegularFile(distribution.resolve("sharedlists-server.jar"))) { "Server JAR is missing: $distribution" }
         process = ProcessBuilder(
             Path.of(System.getProperty("java.home"), "bin", "java.exe").toString(),
-            "-cp",
-            "${distribution.resolve("lib")}\\*",
-            "dev.sharedlists.server.MainKt",
+            "-jar",
+            distribution.resolve("sharedlists-server.jar").toString(),
             "--config",
             directory.resolve("sharedlists.properties").toString(),
         ).redirectErrorStream(true).start()
@@ -416,6 +471,28 @@ private class TemporaryServerInstallation : AutoCloseable {
         awaitReady()
     }
 
+    fun startFails(): Boolean {
+        check(process == null) { "Server process is already running." }
+        synchronized(processOutput) {
+            processOutput.setLength(0)
+        }
+        process = ProcessBuilder(
+            Path.of(System.getProperty("java.home"), "bin", "java.exe").toString(),
+            "-jar",
+            distribution.resolve("sharedlists-server.jar").toString(),
+            "--config",
+            directory.resolve("sharedlists.properties").toString(),
+        ).redirectErrorStream(true).start()
+        process?.inputStream?.bufferedReader()?.use { reader ->
+            synchronized(processOutput) {
+                processOutput.append(reader.readText())
+            }
+        }
+        val result = process?.waitFor(10, TimeUnit.SECONDS) ?: false
+        process = null
+        return result
+    }
+
     fun stop() {
         val currentProcess = process ?: return
         currentProcess.destroy()
@@ -426,13 +503,29 @@ private class TemporaryServerInstallation : AutoCloseable {
     override fun close() {
         stop()
         directory.toFile().deleteRecursively()
+        backups.forEach { it.toFile().deleteRecursively() }
+    }
+
+    fun writeConfiguration(extraLine: String) {
+        directory.resolve("sharedlists.properties").writeText(
+            """
+            bindAddress=127.0.0.1
+            authorizedDevicesDirectory=data/authorized-devices
+            port=$port
+            serverIp=127.0.0.1
+            databaseFile=data/sharedlists.db
+            tlsCertificateFile=data/tls/server.pem
+            tlsPrivateKeyFile=data/tls/server-key.pem
+            $extraLine
+            """.trimIndent(),
+        )
     }
 
     private fun awaitReady() {
         val deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos()
         while (System.nanoTime() < deadline) {
             check(process?.isAlive == true) { "Server exited before readiness: ${output()}" }
-            if (output().contains("READY port=$port")) {
+            if (output().contains("STARTED serviceUri=https://127.0.0.1:$port")) {
                 Socket("127.0.0.1", port).use {
                     return
                 }
@@ -443,22 +536,27 @@ private class TemporaryServerInstallation : AutoCloseable {
     }
 
     private fun copyDistribution() {
-        val source = Path.of("build/install/server").toAbsolutePath()
-        check(Files.isDirectory(source)) { "Server distribution is missing: $source" }
+        val source = Path.of("build/libs/sharedlists-server.jar").toAbsolutePath()
+        check(Files.isRegularFile(source)) { "Server JAR is missing: $source" }
+        Files.createDirectories(distribution)
+        Files.copy(source, distribution.resolve(source.fileName), StandardCopyOption.REPLACE_EXISTING)
+    }
+
+    fun output(): String =
+        synchronized(processOutput) {
+            processOutput.toString()
+        }
+
+    private fun copyTree(source: Path, target: Path) {
         Files.walk(source).use { paths ->
             paths.forEach { sourcePath ->
-                val target = distribution.resolve(source.relativize(sourcePath).toString())
+                val targetPath = target.resolve(source.relativize(sourcePath).toString())
                 if (Files.isDirectory(sourcePath)) {
-                    Files.createDirectories(target)
+                    Files.createDirectories(targetPath)
                 } else {
-                    Files.copy(sourcePath, target, StandardCopyOption.REPLACE_EXISTING)
+                    Files.copy(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING)
                 }
             }
         }
     }
-
-    private fun output(): String =
-        synchronized(processOutput) {
-            processOutput.toString()
-        }
 }

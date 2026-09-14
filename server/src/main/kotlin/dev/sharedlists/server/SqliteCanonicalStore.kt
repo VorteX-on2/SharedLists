@@ -31,16 +31,42 @@ internal class SqliteCanonicalStore(
     private val connection: Connection
     private val lock = Any()
     private val _journalEntries = MutableSharedFlow<JournalEntry>(extraBufferCapacity = 256)
+    private val expectedColumnSets = mapOf(
+        "synchronization_metadata" to setOf("singleton", "generation", "head_revision"),
+        "list_items" to setOf("id", "list_id", "text", "position", "marked"),
+        "item_tombstones" to setOf("item_id", "deleted_revision"),
+        "shared_lists" to setOf("id", "display_name", "normalized_name"),
+        "list_tombstones" to setOf("list_id", "deleted_revision"),
+        "operation_journal" to setOf(
+            "revision", "operation_id", "request_fingerprint", "operation_type", "list_id", "list_name",
+            "item_id", "item_text", "marked_value", "predecessor_item_id", "successor_item_id", "outcome",
+        ),
+    )
+    private val expectedDefinitions = mapOf(
+        "synchronization_metadata" to setOf("primary key", "check (singleton = 1)"),
+        "list_items" to setOf("primary key", "references shared_lists(id)", "unique (list_id, position)"),
+        "item_tombstones" to setOf("primary key"),
+        "shared_lists" to setOf("primary key", "unique"),
+        "list_tombstones" to setOf("primary key"),
+        "operation_journal" to setOf("primary key", "operation_id text not null unique"),
+    )
 
     val journalEntries: SharedFlow<JournalEntry> = _journalEntries
 
     init {
         Files.createDirectories(requireNotNull(databaseFile.parent))
+        val existingDatabase = Files.exists(databaseFile)
         connection = DriverManager.getConnection("jdbc:sqlite:${databaseFile.toAbsolutePath()}")
         connection.createStatement().use { statement ->
             statement.execute("PRAGMA foreign_keys = ON")
             statement.execute("PRAGMA journal_mode = DELETE")
             statement.execute("PRAGMA synchronous = FULL")
+            if (existingDatabase) {
+                require(statement.executeQuery("PRAGMA quick_check").use { result -> result.next() && result.getString(1) == "ok" }) {
+                    "SQLite integrity check failed."
+                }
+                require(isSupportedSchema(statement)) { "SQLite schema is unsupported; restore a matching whole-installation backup." }
+            }
             statement.execute(
                 """
                 CREATE TABLE IF NOT EXISTS synchronization_metadata (
@@ -105,19 +131,6 @@ internal class SqliteCanonicalStore(
                 )
                 """.trimIndent(),
             )
-            if (!operationJournalColumns().contains("marked_value")) {
-                statement.execute("ALTER TABLE operation_journal ADD COLUMN marked_value INTEGER NOT NULL DEFAULT 0")
-            }
-            val operationJournalColumns = operationJournalColumns()
-            if ("marked_value" !in operationJournalColumns) {
-                statement.execute("ALTER TABLE operation_journal ADD COLUMN marked_value INTEGER NOT NULL DEFAULT 0")
-            }
-            if ("predecessor_item_id" !in operationJournalColumns) {
-                statement.execute("ALTER TABLE operation_journal ADD COLUMN predecessor_item_id TEXT NOT NULL DEFAULT ''")
-            }
-            if ("successor_item_id" !in operationJournalColumns) {
-                statement.execute("ALTER TABLE operation_journal ADD COLUMN successor_item_id TEXT NOT NULL DEFAULT ''")
-            }
         }
 
         connection.prepareStatement(
@@ -249,6 +262,45 @@ internal class SqliteCanonicalStore(
             connection.close()
         }
     }
+
+    private fun isSupportedSchema(statement: Statement): Boolean {
+        val expectedTables = setOf(
+            "synchronization_metadata",
+            "list_items",
+            "item_tombstones",
+            "shared_lists",
+            "list_tombstones",
+            "operation_journal",
+        )
+        val actualTables = statement.executeQuery(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        ).use { result ->
+            buildSet {
+                while (result.next()) add(result.getString(1))
+            }
+        }
+        return actualTables == expectedTables &&
+            expectedColumnSets.all { (table, expectedColumns) -> columns(statement, table) == expectedColumns } &&
+            expectedDefinitions.all { (table, fragments) ->
+                tableDefinition(statement, table).let { definition -> fragments.all(definition::contains) }
+            }
+    }
+
+    private fun columns(statement: Statement, table: String): Set<String> =
+        statement.executeQuery("PRAGMA table_info($table)").use { result ->
+            buildSet {
+                while (result.next()) add(result.getString("name"))
+            }
+        }
+
+    private fun tableDefinition(statement: Statement, table: String): String =
+        statement.connection.prepareStatement("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").use { query ->
+            query.setString(1, table)
+            query.executeQuery().use { result ->
+                require(result.next()) { "SQLite schema is missing $table." }
+                result.getString(1).lowercase().replace(Regex("""\s+"""), " ")
+            }
+        }
 
     private fun existing(operation: ClientOperation): JournalEntry? =
         connection.prepareStatement(

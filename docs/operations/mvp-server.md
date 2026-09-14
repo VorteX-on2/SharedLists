@@ -8,7 +8,7 @@ Run the server as a foreground process on a Java 21 runtime:
 java -jar sharedlists-server.jar --config sharedlists.properties
 ```
 
-The administrator may use any external process manager. The MVP does not include an installer, daemon mode, restart loop, container image, reverse proxy, or service-manager integration.
+Build the artifact with `.\gradlew.bat --offline --no-daemon :server:jar`; it is written to `server\build\libs\sharedlists-server.jar`. Copy that JAR and its matching `sharedlists.properties` installation directory to the host. The administrator may use any external process manager. The MVP does not include an installer, daemon mode, restart loop, container image, reverse proxy, or service-manager integration.
 
 ## Configuration
 
@@ -51,9 +51,9 @@ A fatal storage error closes active streams and exits nonzero. On Ctrl+C or a te
 
 The only supported backup is a stopped copy of the whole installation: JAR, configuration, database, TLS identity, and authorized-device directory.
 
-To restore, stop the process, replace the complete installation with one matching backup, and start it. Startup validation decides whether the restored installation is usable.
+To restore, stop the process, replace the complete installation with one matching backup, and start it. Startup validation decides whether the restored installation is usable. Do not copy an individual database, certificate, allowlist, or JAR into a live or unrelated installation.
 
-To upgrade, stop the process, take a whole-installation backup, replace the JAR, and start it. If startup rejects the schema or configuration, restore both the previous JAR and its matching backup. The MVP provides no online backup, migration runner, partial restore, or automatic rollback.
+To upgrade, stop the process, take a whole-installation backup, replace the JAR, and start it. If startup rejects the schema or configuration, restore both the previous JAR and its matching backup. Roll back only by restoring that complete pair while stopped. The MVP provides no online backup, migration runner, partial restore, or automatic rollback.
 
 ## Server identity replacement
 

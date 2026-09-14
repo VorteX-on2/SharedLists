@@ -181,6 +181,10 @@ interface CachedSharedListsClient {
     fun cachedCanonicalState(): CanonicalState
 }
 
+interface LocalStateResettableClient {
+    fun resetLocalState()
+}
+
 interface ObservableSharedListsClient {
     fun observeState(observer: (ClientState.Ready) -> Unit)
 }

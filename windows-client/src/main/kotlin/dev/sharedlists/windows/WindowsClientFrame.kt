@@ -61,6 +61,7 @@ class WindowsClientFrame(
     private val quickAddButton = JButton("Quick add")
     private val quickMarkButton = JButton("Quick mark")
     private val resetDeviceButton = JButton("Reset device setup")
+    private val resetLocalDataButton = JButton("Reset local data")
     private val renameListButton = JButton("Rename list")
     private val editItemButton = JButton("Edit item")
     private val retryDeviceKeyButton = JButton("Retry device key")
@@ -126,6 +127,20 @@ class WindowsClientFrame(
         retryDeviceKeyButton.addActionListener(ActionListener { controller.retryDeviceKey() })
         retrySynchronizationButton.addActionListener(ActionListener { controller.retryNow() })
         takeOverSynchronizationButton.addActionListener(ActionListener { controller.takeOverSynchronization() })
+        resetLocalDataButton.addActionListener(
+            ActionListener {
+                if (
+                    JOptionPane.showConfirmDialog(
+                        this,
+                        "Delete locally cached shared-list data and the unconfirmed edit? Your Windows device key is preserved.",
+                        "Reset local synchronization data",
+                        JOptionPane.OK_CANCEL_OPTION,
+                    ) == JOptionPane.OK_OPTION
+                ) {
+                    controller.resetLocalSynchronizationData()
+                }
+            },
+        )
         listView.addListSelectionListener { renderItems() }
         narrowCardView.addListSelectionListener { selectNarrowCard() }
         itemView.addListSelectionListener {
@@ -197,6 +212,7 @@ class WindowsClientFrame(
             add(retryDeviceKeyButton)
             add(retrySynchronizationButton)
             add(takeOverSynchronizationButton)
+            add(resetLocalDataButton)
             add(createListButton)
             add(createItemButton)
             add(renameListButton)
@@ -286,6 +302,7 @@ class WindowsClientFrame(
             retryDeviceKeyButton.isVisible = presentation.unreadableDeviceKey
             retrySynchronizationButton.isVisible = presentation.retryAvailable
             takeOverSynchronizationButton.isVisible = presentation.takeoverAvailable
+            resetLocalDataButton.isVisible = presentation.resetLocalDataAvailable
             fingerprintField.isEnabled = !presentation.connectionActive
             hostField.isEnabled = !presentation.connectionActive
             portField.isEnabled = !presentation.connectionActive

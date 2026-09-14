@@ -11,6 +11,7 @@ import dev.sharedlists.client.ForegroundSharedListsClient
 import dev.sharedlists.client.ListItem
 import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.ListItemId
+import dev.sharedlists.client.LocalStateResettableClient
 import dev.sharedlists.client.SetMarked
 import dev.sharedlists.client.SharedList
 import dev.sharedlists.client.SharedListId
@@ -189,6 +190,24 @@ class WindowsSynchronizationControllerTest {
         secondFacade.complete(liveState(CanonicalState()))
 
         assertTrue(controller.presentation().editingEnabled)
+    }
+
+    @Test
+    fun `resetting local synchronization data preserves device setup`() {
+        val facade = ResettableSharedListsClient()
+        val configuration = ServerConfiguration("192.0.2.10", 8443, FINGERPRINT)
+        val store = InMemoryServerConfigurationStore().apply { save(configuration) }
+        val controller = WindowsSynchronizationController(
+            clientFactory = StaticWindowsClientFactory(facade),
+            configurationStore = store,
+            synchronizationRunner = SynchronizationRunner { block -> block() },
+        )
+
+        controller.resetLocalSynchronizationData()
+
+        assertTrue(facade.reset)
+        assertEquals(configuration, controller.presentation().configuration)
+        assertEquals("Local synchronization data reset", controller.presentation().statusMessage)
     }
 
     @Test
@@ -421,6 +440,18 @@ class WindowsSynchronizationControllerTest {
         fun runScheduled() {
             requireNotNull(block).invoke()
         }
+    }
+
+    private class ResettableSharedListsClient : LocalStateResettableClient, SharedListsClient {
+        var reset = false
+
+        override fun resetLocalState() {
+            reset = true
+        }
+
+        override suspend fun submit(command: EditCommand): ClientState = error("Not used.")
+
+        override suspend fun synchronize(): ClientState = error("Not used.")
     }
 
     private class CapturingSharedListsClient(

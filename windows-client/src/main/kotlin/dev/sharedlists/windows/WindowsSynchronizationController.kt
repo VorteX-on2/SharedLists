@@ -17,6 +17,7 @@ import dev.sharedlists.client.ForegroundSharedListsClient
 import dev.sharedlists.client.GrpcSharedListsClient
 import dev.sharedlists.client.ListItem
 import dev.sharedlists.client.ListItemId
+import dev.sharedlists.client.LocalStateResettableClient
 import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
@@ -161,6 +162,7 @@ data class WindowsClientPresentation(
     val cards: List<WindowsListCard> = emptyList(),
     val lists: List<String>,
     val retryAvailable: Boolean = false,
+    val resetLocalDataAvailable: Boolean = false,
     val sharedLists: List<WindowsListRow> = emptyList(),
     val statusMessage: String?,
     val setupRequired: Boolean,
@@ -297,6 +299,30 @@ class WindowsSynchronizationController(
     fun retryNow() {
         periodicRetryEnabled = true
         presentation.configuration?.let(::startConnection)
+    }
+
+    fun resetLocalSynchronizationData() {
+        val configuration = presentation.configuration ?: return
+        cancelForegroundSynchronization()
+        val client = clientFactory.create(configuration)
+        val resettableClient = client as? LocalStateResettableClient
+        if (resettableClient == null) {
+            update(presentation.copy(statusMessage = "Local synchronization reset is unavailable."))
+            return
+        }
+        resettableClient.resetLocalState()
+        cachedState = CanonicalState()
+        update(
+            presentation.copy(
+                cards = emptyList(),
+                editability = Editability.READ_ONLY,
+                emptyStateMessage = "Local synchronized data was reset. Reconnect to take a fresh snapshot.",
+                lists = emptyList(),
+                resetLocalDataAvailable = false,
+                sharedLists = emptyList(),
+                statusMessage = "Local synchronization data reset",
+            ),
+        )
     }
 
     fun setNetworkAvailable(available: Boolean) {
@@ -594,6 +620,7 @@ class WindowsSynchronizationController(
                 sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
                 cards = cards(),
                 retryAvailable = clientState.connectivity != ConnectivityState.LIVE,
+                resetLocalDataAvailable = clientState.connectivity == ConnectivityState.FATAL,
                 statusMessage = statusMessage(clientState, isLive),
                 takeoverAvailable = clientState.connectivity == ConnectivityState.SUPERSEDED,
                 alphabeticalSort = alphabeticalSort,

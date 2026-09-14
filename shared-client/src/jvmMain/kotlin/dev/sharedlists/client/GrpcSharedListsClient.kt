@@ -77,11 +77,20 @@ interface ClientStateStore {
     fun save(canonicalState: CanonicalState, cursor: SynchronizationCursor) {
         save(cursor)
     }
+
+    fun clearLocalState() = Unit
+
+    fun clearUnconfirmedOperation() = Unit
+
+    fun loadUnconfirmedOperation(): EditCommand? = null
+
+    fun saveUnconfirmedOperation(command: EditCommand) = Unit
 }
 
 class FileClientStateStore(
     private val file: File,
 ) : ClientStateStore {
+    private val unconfirmedFile = File(requireNotNull(file.parentFile), "${file.name}.unconfirmed")
     override fun hasCanonicalState(): Boolean =
         file.exists() && Properties().also { properties -> file.inputStream().use(properties::load) }
             .containsKey("list.count")
@@ -157,15 +166,108 @@ class FileClientStateStore(
             StandardCopyOption.REPLACE_EXISTING,
         )
     }
+
+    override fun clearLocalState() {
+        Files.deleteIfExists(file.toPath())
+        clearUnconfirmedOperation()
+    }
+
+    override fun clearUnconfirmedOperation() {
+        Files.deleteIfExists(unconfirmedFile.toPath())
+    }
+
+    override fun loadUnconfirmedOperation(): EditCommand? {
+        if (!unconfirmedFile.exists()) {
+            return null
+        }
+        return Properties().also { properties -> unconfirmedFile.inputStream().use(properties::load) }
+            .let(OperationCodec::decode)
+    }
+
+    override fun saveUnconfirmedOperation(command: EditCommand) {
+        val parent = requireNotNull(unconfirmedFile.parentFile)
+        parent.mkdirs()
+        val temporaryFile = Files.createTempFile(parent.toPath(), "${unconfirmedFile.name}.", ".tmp")
+        FileOutputStream(temporaryFile.toFile()).use { stream ->
+            OperationCodec.encode(command).store(stream, null)
+            stream.fd.sync()
+        }
+        Files.move(temporaryFile, unconfirmedFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+
+private object OperationCodec {
+    fun decode(properties: Properties): EditCommand {
+        val operationId = OperationId.parse(required(properties, "operationId"))
+        val listId = SharedListId.parse(required(properties, "listId"))
+        val itemId = properties.getProperty("itemId")?.let(ListItemId::parse)
+        return when (required(properties, "type")) {
+            "create-list" -> CreateList(operationId, listId, required(properties, "name"))
+            "delete-list" -> DeleteList(operationId, listId)
+            "rename-list" -> RenameList(operationId, listId, required(properties, "name"))
+            "create-item" -> CreateItem(requireNotNull(itemId), listId, operationId, required(properties, "text"))
+            "delete-item" -> DeleteItem(requireNotNull(itemId), listId, operationId)
+            "edit-item-text" -> EditItemText(requireNotNull(itemId), listId, operationId, required(properties, "text"))
+            "move-item" -> MoveItem(
+                requireNotNull(itemId),
+                listId,
+                operationId,
+                properties.getProperty("predecessorItemId")?.let(ListItemId::parse),
+                properties.getProperty("successorItemId")?.let(ListItemId::parse),
+            )
+            "set-marked" -> SetMarked(requireNotNull(itemId), listId, operationId, required(properties, "value").toBooleanStrict())
+            else -> error("Unconfirmed operation has an unknown type.")
+        }
+    }
+
+    fun encode(command: EditCommand): Properties =
+        Properties().apply {
+            setProperty("operationId", command.operationId.value)
+            when (command) {
+                is CreateList -> {
+                    setProperty("listId", command.listId.value)
+                    setProperty("name", command.name)
+                    setProperty("type", "create-list")
+                }
+                is DeleteList -> {
+                    setProperty("listId", command.listId.value)
+                    setProperty("type", "delete-list")
+                }
+                is RenameList -> {
+                    setProperty("listId", command.listId.value)
+                    setProperty("name", command.name)
+                    setProperty("type", "rename-list")
+                }
+                is CreateItem -> item(command.listId, command.itemId, "create-item").also { setProperty("text", command.text) }
+                is DeleteItem -> item(command.listId, command.itemId, "delete-item")
+                is EditItemText -> item(command.listId, command.itemId, "edit-item-text").also { setProperty("text", command.text) }
+                is MoveItem -> {
+                    item(command.listId, command.itemId, "move-item")
+                    command.predecessorItemId?.let { setProperty("predecessorItemId", it.value) }
+                    command.successorItemId?.let { setProperty("successorItemId", it.value) }
+                }
+                is SetMarked -> item(command.listId, command.itemId, "set-marked").also { setProperty("value", command.value.toString()) }
+            }
+        }
+
+    private fun Properties.item(listId: SharedListId, itemId: ListItemId, type: String) {
+        setProperty("itemId", itemId.value)
+        setProperty("listId", listId.value)
+        setProperty("type", type)
+    }
+
+    private fun required(properties: Properties, name: String): String =
+        requireNotNull(properties.getProperty(name)) { "Unconfirmed operation is missing $name." }
 }
 
 class GrpcSharedListsClient(
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
-) : CachedSharedListsClient, ForegroundSharedListsClient, ObservableSharedListsClient, SharedListsClient {
+) : CachedSharedListsClient, ForegroundSharedListsClient, LocalStateResettableClient, ObservableSharedListsClient, SharedListsClient {
     private var activeSession: ActiveSession? = null
     private var cachedState = stateStore.loadCanonicalState()
+    private var unconfirmedCommand = stateStore.loadUnconfirmedOperation()
     private var stateObserver: (ClientState.Ready) -> Unit = {}
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -195,6 +297,7 @@ class GrpcSharedListsClient(
                 channel,
                 unauthenticatedStub.withInterceptors(BearerTokenInterceptor(token)),
                 cachedState,
+                unconfirmedCommand,
             )
             activeSession = session
             session.open(stateStore.loadCursor()?.takeIf { stateStore.hasCanonicalState() })
@@ -202,7 +305,12 @@ class GrpcSharedListsClient(
             check(live.generation == session.cursor.generation && live.revision == session.cursor.lastAppliedRevision) {
                 "Server declared an inconsistent live cursor."
             }
-            return session.ready()
+            val outcome = session.reconcileUnconfirmedOperation()
+            if (outcome != null) {
+                stateStore.clearUnconfirmedOperation()
+                unconfirmedCommand = null
+            }
+            return session.ready(outcome)
         } catch (exception: Exception) {
             channel.shutdownNow()
             activeSession = null
@@ -219,8 +327,14 @@ class GrpcSharedListsClient(
     }
 
     override suspend fun submit(command: EditCommand): ClientState {
+        check(unconfirmedCommand == null) { "An edit is already awaiting confirmation." }
         val session = requireNotNull(activeSession) { "Synchronization is not live." }
-        return session.submit(command)
+        unconfirmedCommand = command
+        stateStore.saveUnconfirmedOperation(command)
+        return session.submit(command).also {
+            stateStore.clearUnconfirmedOperation()
+            unconfirmedCommand = null
+        }
     }
 
     override fun observeState(observer: (ClientState.Ready) -> Unit) {
@@ -229,6 +343,13 @@ class GrpcSharedListsClient(
     }
 
     override fun cachedCanonicalState(): CanonicalState = cachedState
+
+    override fun resetLocalState() {
+        cancelForegroundSynchronization()
+        stateStore.clearLocalState()
+        cachedState = CanonicalState()
+        unconfirmedCommand = null
+    }
 
     override fun cancelForegroundSynchronization() {
         activeSession?.cancel()
@@ -239,14 +360,16 @@ class GrpcSharedListsClient(
         private val channel: io.grpc.ManagedChannel,
         private val stub: SharedListsGrpcKt.SharedListsCoroutineStub,
         initialState: CanonicalState,
+        unconfirmedCommand: EditCommand?,
     ) {
         private var canonicalState = initialState
         private var snapshotBatchIndex = 0
         private var snapshotGeneration: String? = null
         private var snapshotRevision: Long? = null
         private val stagedSnapshotLists = mutableListOf<SharedList>()
-        private var unconfirmedOperationId: String? = null
-        private var unconfirmedOutcome: CompletableDeferred<DurableOperationOutcome>? = null
+        private var unconfirmedOperationId: String? = unconfirmedCommand?.operationId?.value
+        private var unconfirmedOutcome: CompletableDeferred<DurableOperationOutcome>? =
+            unconfirmedCommand?.let { CompletableDeferred() }
         private val requests = CoroutineChannel<SyncRequest>()
         private val responseJob = scope.launch {
             try {
@@ -290,6 +413,19 @@ class GrpcSharedListsClient(
                 unconfirmedOperationId = null
                 unconfirmedOutcome = null
             }
+        }
+
+        suspend fun reconcileUnconfirmedOperation(): DurableOperationOutcome? {
+            val outcome = unconfirmedOutcome ?: return null
+            if (!outcome.isCompleted) {
+                val command = requireNotNull(unconfirmedCommand)
+                requests.send(
+                    SyncRequest.newBuilder().setSubmitOperation(
+                        SubmitOperation.newBuilder().setOperation(command.toProto()).build(),
+                    ).build(),
+                )
+            }
+            return outcome.await()
         }
 
         suspend fun close() {

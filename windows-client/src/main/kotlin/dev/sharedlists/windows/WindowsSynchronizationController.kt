@@ -315,7 +315,14 @@ class WindowsSynchronizationController(
         val client = try {
             clientFactory.create(configuration)
         } catch (exception: IllegalArgumentException) {
-            showCorruptLocalState()
+            val resetter = clientFactory as? WindowsGrpcClientFactory
+            if (resetter == null) {
+                showCorruptLocalState()
+                return
+            }
+            resetter.resetLocalState(configuration)
+            cachedState = CanonicalState()
+            update(presentation.copy(resetLocalDataAvailable = false, statusMessage = "Local synchronization data reset"))
             return
         }
         val resettableClient = client as? LocalStateResettableClient
@@ -363,14 +370,7 @@ class WindowsSynchronizationController(
         val client = try {
             clientFactory.create(configuration)
         } catch (exception: IllegalArgumentException) {
-            val resetter = clientFactory as? WindowsGrpcClientFactory
-            if (resetter == null) {
-                showCorruptLocalState()
-                return
-            }
-            resetter.resetLocalState(configuration)
-            cachedState = CanonicalState()
-            update(presentation.copy(resetLocalDataAvailable = false, statusMessage = "Local synchronization data reset"))
+            showCorruptLocalState()
             return
         }
         cachedState = (client as? CachedSharedListsClient)?.cachedCanonicalState() ?: cachedState

@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package sharedlists.v1;
+
+option java_multiple_files = true;
+option java_package = "dev.sharedlists.protocol";
+option java_outer_classname = "SharedListsProto";
+
+service SharedLists {
+  rpc Sync(stream SyncRequest) returns (stream SyncResponse);
+}
+
+message SynchronizationCursor {
+  string generation = 1;
+  int64 last_applied_revision = 2;
+}
+
+message OpenSync {
+  optional SynchronizationCursor cursor = 1;
+}
+
+message AppliedThrough {
+  int64 revision = 1;
+}
+
+message SyncRequest {
+  oneof message {
+    OpenSync open = 1;
+    AppliedThrough applied_through = 2;
+  }
+}
+
+message EmptySnapshot {
+  string generation = 1;
+  int64 revision = 2;
+}
+
+message Live {
+  string generation = 1;
+  int64 revision = 2;
+}
+
+message SyncResponse {
+  oneof message {
+    EmptySnapshot empty_snapshot = 1;
+    Live live = 2;
+  }
+}

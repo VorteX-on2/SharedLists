@@ -34,7 +34,7 @@ class WindowsSynchronizationControllerTest {
         assertFalse(controller.presentation().editingEnabled)
         facade.complete(liveState(CanonicalState()))
 
-        assertNull(controller.presentation().statusMessage)
+        assertEquals("Device enrolled and synchronized", controller.presentation().statusMessage)
         assertFalse(controller.presentation().connectionActive)
         assertEquals("No shared lists yet.", controller.presentation().emptyStateMessage)
         assertTrue(controller.presentation().editingEnabled)
@@ -112,7 +112,7 @@ class WindowsSynchronizationControllerTest {
         secondFacade.complete(liveState(CanonicalState()))
         firstFacade.fail(IllegalStateException("older attempt"))
 
-        assertNull(controller.presentation().statusMessage)
+        assertEquals("Device enrolled and synchronized", controller.presentation().statusMessage)
         assertTrue(controller.presentation().editingEnabled)
     }
 

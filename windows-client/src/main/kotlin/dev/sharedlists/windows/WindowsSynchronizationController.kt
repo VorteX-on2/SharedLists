@@ -109,6 +109,7 @@ data class WindowsClientPresentation(
     val lists: List<String>,
     val statusMessage: String?,
     val setupRequired: Boolean,
+    val unreadableDeviceKey: Boolean,
 ) {
     val editingEnabled: Boolean
         get() = editability == Editability.LIVE
@@ -151,6 +152,7 @@ class WindowsSynchronizationController(
             "Device setup required"
         },
         setupRequired = setupRequired(),
+        unreadableDeviceKey = deviceKeyUnreadable,
     )
 
     fun createDeviceKey(host: String, port: String, certificateFingerprint: String) {
@@ -238,6 +240,24 @@ class WindowsSynchronizationController(
     }
 
     fun presentation(): WindowsClientPresentation = presentation
+
+    fun retryDeviceKey() {
+        deviceKeyUnreadable = false
+        val fingerprint = deviceKeyFingerprint()
+        update(
+            presentation.copy(
+                deviceKeyFingerprint = fingerprint,
+                emptyStateMessage = if (deviceKeyUnreadable) {
+                    "Device setup cannot be read. Retry after Windows key storage is available."
+                } else {
+                    "Connect to synchronize shared lists."
+                },
+                statusMessage = if (deviceKeyUnreadable) "Device setup unavailable" else "Ready to connect",
+                setupRequired = setupRequired(),
+                unreadableDeviceKey = deviceKeyUnreadable,
+            ),
+        )
+    }
 
     fun exportDevicePublicKey(file: File) {
         val enrollment = requireNotNull(deviceEnrollment) { "Windows device enrollment is unavailable." }
@@ -361,7 +381,7 @@ class WindowsSynchronizationController(
 
     private fun statusMessage(clientState: ClientState.Ready, isLive: Boolean): String? =
         when {
-            isLive -> null
+            isLive -> "Device enrolled and synchronized"
             clientState.connectivity == ConnectivityState.CONNECTING -> "Connecting…"
             clientState.connectivity == ConnectivityState.SYNCHRONIZING -> "Synchronizing…"
             else -> "Disconnected — cached lists are read-only"

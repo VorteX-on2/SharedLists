@@ -7,6 +7,7 @@ import java.awt.event.ActionListener
 import java.io.File
 import javax.swing.BorderFactory
 import javax.swing.JButton
+import javax.swing.DefaultListModel
 import javax.swing.JFileChooser
 import javax.swing.JFrame
 import javax.swing.JLabel
@@ -26,9 +27,11 @@ class WindowsClientFrame(
     private val emptyStateLabel = JLabel()
     private val fingerprintField = JTextField(64)
     private val hostField = JTextField(18)
-    private val listModel = javax.swing.DefaultListModel<String>()
+    private val exportDeviceKeyButton = JButton("Export public key")
+    private val listModel = DefaultListModel<String>()
     private val portField = JTextField(5)
     private val resetDeviceButton = JButton("Reset device setup")
+    private val retryDeviceKeyButton = JButton("Retry device key")
     private val statusLabel = JLabel()
 
     init {
@@ -69,6 +72,8 @@ class WindowsClientFrame(
                 }
             },
         )
+        exportDeviceKeyButton.addActionListener(ActionListener { exportPublicKey() })
+        retryDeviceKeyButton.addActionListener(ActionListener { controller.retryDeviceKey() })
         controller.observePresentation(::render)
         pack()
         setLocationByPlatform(true)
@@ -85,7 +90,9 @@ class WindowsClientFrame(
             add(fingerprintField)
             add(connectButton)
             add(createDeviceKeyButton)
+            add(exportDeviceKeyButton)
             add(resetDeviceButton)
+            add(retryDeviceKeyButton)
         }
 
     private fun contentPanel(): JPanel =
@@ -106,6 +113,7 @@ class WindowsClientFrame(
 
     private fun render(presentation: WindowsClientPresentation) {
         val applyPresentation = {
+            val shouldOpenExportDialog = presentation.exportRequired && !exportDeviceKeyButton.isVisible
             presentation.configuration?.let { configuration ->
                 hostField.text = configuration.host
                 portField.text = configuration.port.toString()
@@ -117,11 +125,13 @@ class WindowsClientFrame(
             statusLabel.text = presentation.statusMessage.orEmpty()
             connectButton.isEnabled = !presentation.connectionActive
             createDeviceKeyButton.isVisible = presentation.setupRequired
-            resetDeviceButton.isVisible = !presentation.setupRequired
+            exportDeviceKeyButton.isVisible = presentation.exportRequired
+            resetDeviceButton.isVisible = !presentation.setupRequired && !presentation.unreadableDeviceKey
+            retryDeviceKeyButton.isVisible = presentation.unreadableDeviceKey
             fingerprintField.isEnabled = !presentation.connectionActive
             hostField.isEnabled = !presentation.connectionActive
             portField.isEnabled = !presentation.connectionActive
-            if (presentation.exportRequired) {
+            if (shouldOpenExportDialog) {
                 exportPublicKey()
             }
         }

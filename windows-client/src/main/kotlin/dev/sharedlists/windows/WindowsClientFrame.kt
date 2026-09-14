@@ -9,6 +9,7 @@ import java.io.File
 import javax.swing.BorderFactory
 import javax.swing.JButton
 import javax.swing.DefaultListModel
+import javax.swing.JCheckBox
 import javax.swing.JFileChooser
 import javax.swing.JFrame
 import javax.swing.JLabel
@@ -35,6 +36,7 @@ class WindowsClientFrame(
     private val exportDeviceKeyButton = JButton("Export public key")
     private val listModel = DefaultListModel<WindowsListRow>()
     private val listView = JList(listModel)
+    private val markedCheckBox = JCheckBox("Marked")
     private val itemModel = DefaultListModel<WindowsItemRow>()
     private val itemTextField = JTextField()
     private val itemView = JList(itemModel)
@@ -89,10 +91,14 @@ class WindowsClientFrame(
         deleteListButton.addActionListener(ActionListener { deleteSelectedList() })
         deleteItemButton.addActionListener(ActionListener { deleteSelectedItem() })
         editItemButton.addActionListener(ActionListener { editSelectedItem() })
+        markedCheckBox.addActionListener(ActionListener { setSelectedItemMarked() })
         renameListButton.addActionListener(ActionListener { renameSelectedList() })
         retryDeviceKeyButton.addActionListener(ActionListener { controller.retryDeviceKey() })
         listView.addListSelectionListener { renderItems() }
-        itemView.addListSelectionListener { itemTextField.text = itemView.selectedValue?.text.orEmpty() }
+        itemView.addListSelectionListener {
+            itemTextField.text = itemView.selectedValue?.text.orEmpty()
+            markedCheckBox.isSelected = itemView.selectedValue?.marked ?: false
+        }
         controller.observePresentation(::render)
         pack()
         setLocationByPlatform(true)
@@ -141,6 +147,7 @@ class WindowsClientFrame(
             add(JPanel(BorderLayout(0, 6)).apply {
                 add(itemTextField, BorderLayout.NORTH)
                 add(emptyStateLabel, BorderLayout.SOUTH)
+                add(markedCheckBox)
             }, BorderLayout.SOUTH)
         }
 
@@ -165,6 +172,7 @@ class WindowsClientFrame(
             editItemButton.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
             deleteItemButton.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
             itemTextField.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
+            markedCheckBox.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
             createDeviceKeyButton.isVisible = presentation.setupRequired
             exportDeviceKeyButton.isVisible = presentation.exportRequired
             resetDeviceButton.isVisible = !presentation.setupRequired && !presentation.unreadableDeviceKey
@@ -231,6 +239,12 @@ class WindowsClientFrame(
         controller.editItemText(list.id, item.id, itemTextField.text)
     }
 
+    private fun setSelectedItemMarked() {
+        val list = listView.selectedValue ?: return
+        val item = itemView.selectedValue ?: return
+        controller.setItemMarked(list.id, item.id, markedCheckBox.isSelected)
+    }
+
     private fun renameSelectedList() {
         val currentName = listView.selectedValue?.name ?: return
         val name = JOptionPane.showInputDialog(this, "List name", currentName) ?: return
@@ -240,17 +254,19 @@ class WindowsClientFrame(
     private fun renderItems() {
         itemModel.clear()
         itemTextField.text = ""
+        markedCheckBox.isSelected = false
         listView.selectedValue?.let { list ->
             controller.items(list.id).forEach { item ->
-                itemModel.addElement(WindowsItemRow(item.id, item.text))
+                itemModel.addElement(WindowsItemRow(item.id, item.marked, item.text))
             }
         }
     }
 
     private data class WindowsItemRow(
         val id: ListItemId,
+        val marked: Boolean,
         val text: String,
     ) {
-        override fun toString(): String = text
+        override fun toString(): String = if (marked) "[marked] $text" else text
     }
 }

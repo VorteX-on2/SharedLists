@@ -9,6 +9,7 @@ import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.ListItem
 import dev.sharedlists.client.ListItemId
+import dev.sharedlists.client.SetMarked
 import dev.sharedlists.client.SharedList
 import dev.sharedlists.client.SharedListId
 import dev.sharedlists.client.SharedListsClient
@@ -173,6 +174,29 @@ class WindowsSynchronizationControllerTest {
 
         assertTrue(facade.commands.single() is CreateItem)
         assertEquals(listOf("Milk"), controller.items(list.id).map { it.text })
+    }
+
+    @Test
+    fun `item presentation submits an explicit marked value only while live`() {
+        val list = SharedList(
+            id = SharedListId.parse("a0000000-0000-4000-8000-000000000001"),
+            name = "Groceries",
+            items = listOf(
+                ListItem(
+                    id = ListItemId.parse("b0000000-0000-4000-8000-000000000001"),
+                    marked = false,
+                    text = "Milk",
+                ),
+            ),
+        )
+        val facade = CapturingSharedListsClient(liveState(CanonicalState(listOf(list))))
+        val controller = controller(facade, InMemoryServerConfigurationStore())
+
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+        controller.setItemMarked(list.id, list.items.single().id, true)
+
+        assertEquals(true, (facade.commands.single() as SetMarked).value)
+        assertEquals(false, controller.items(list.id).single().marked)
     }
 
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =

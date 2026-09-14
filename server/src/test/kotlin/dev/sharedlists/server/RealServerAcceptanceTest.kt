@@ -18,6 +18,7 @@ import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
 import dev.sharedlists.client.RenameList
 import dev.sharedlists.client.ServerEndpoint
+import dev.sharedlists.client.SetMarked
 import dev.sharedlists.client.SharedListId
 import java.net.ServerSocket
 import java.net.Socket
@@ -213,6 +214,50 @@ class RealServerAcceptanceTest {
                     listOf("Milk"),
                     fixture.client(1).synchronizeBlocking().canonicalState.lists.single().items.map { it.text },
                 )
+        }
+    }
+
+    @Test
+    fun `independent real clients converge on marked state across restart`() {
+        TemporaryServerInstallation().use { fixture ->
+            fixture.start()
+            val first = fixture.client(0)
+            val second = fixture.client(1)
+            val listId = SharedListId.parse("6111111a-1111-4111-8111-111111111111")
+            val itemId = ListItemId.parse("7111111a-1111-4111-8111-111111111111")
+
+            first.synchronizeBlocking()
+            first.submitBlocking(
+                CreateList(OperationId.parse("9111111a-1111-4111-8111-111111111111"), listId, "Groceries"),
+            )
+            first.submitBlocking(
+                CreateItem(
+                    itemId = itemId,
+                    listId = listId,
+                    operationId = OperationId.parse("a111111a-1111-4111-8111-111111111111"),
+                    text = "Milk",
+                ),
+            )
+            val mark = SetMarked(
+                itemId = itemId,
+                listId = listId,
+                operationId = OperationId.parse("b111111a-1111-4111-8111-111111111111"),
+                value = true,
+            )
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(mark).lastOperationOutcome?.outcome)
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(mark).lastOperationOutcome?.outcome)
+            assertTrue(second.synchronizeBlocking().canonicalState.lists.single().items.single().marked)
+
+            first.submitBlocking(
+                SetMarked(
+                    itemId = itemId,
+                    listId = listId,
+                    operationId = OperationId.parse("c111111a-1111-4111-8111-111111111111"),
+                    value = false,
+                ),
+            )
+            fixture.restart()
+            assertEquals(false, fixture.client(1).synchronizeBlocking().canonicalState.lists.single().items.single().marked)
         }
     }
 

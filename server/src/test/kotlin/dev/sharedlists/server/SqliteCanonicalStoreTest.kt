@@ -1,10 +1,13 @@
 package dev.sharedlists.server
 
 import dev.sharedlists.protocol.ClientOperation
+import dev.sharedlists.protocol.CreateItem
 import dev.sharedlists.protocol.CreateList
+import dev.sharedlists.protocol.DeleteItem
 import dev.sharedlists.protocol.DeleteList
 import dev.sharedlists.protocol.OperationOutcome
 import dev.sharedlists.protocol.RenameList
+import dev.sharedlists.protocol.SetMarked
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -85,6 +88,41 @@ class SqliteCanonicalStoreTest {
         }
     }
 
+    @Test
+    fun `marks and unmarks items idempotently without changing their canonical position`() {
+        fixture().use { fixture ->
+            val listId = "11111111-1111-4111-8111-111111111111"
+            val itemId = "31111111-1111-4111-8111-111111111111"
+            fixture.store.submit(create("21111111-1111-4111-8111-111111111111", listId, "Groceries"))
+            fixture.store.submit(createItem("41111111-1111-4111-8111-111111111111", listId, itemId, "Milk"))
+
+            val marked = fixture.store.submit(setMarked("51111111-1111-4111-8111-111111111111", listId, itemId, true))
+            assertEquals(OperationOutcome.OPERATION_OUTCOME_APPLIED, marked.outcome)
+            assertEquals(true, marked.operation.setMarked.value)
+            assertEquals(marked, fixture.store.submit(setMarked("51111111-1111-4111-8111-111111111111", listId, itemId, true)))
+            assertEquals(0, fixture.store.snapshot().lists.single().itemsList.single().position)
+            assertTrue(fixture.store.snapshot().lists.single().itemsList.single().marked)
+
+            val unmarked = fixture.store.submit(setMarked("61111111-1111-4111-8111-111111111111", listId, itemId, false))
+            assertEquals(OperationOutcome.OPERATION_OUTCOME_APPLIED, unmarked.outcome)
+            assertEquals(false, fixture.store.snapshot().lists.single().itemsList.single().marked)
+
+            fixture.store.submit(deleteItem("71111111-1111-4111-8111-111111111111", listId, itemId))
+            assertEquals(
+                OperationOutcome.OPERATION_OUTCOME_IGNORED,
+                fixture.store.submit(setMarked("81111111-1111-4111-8111-111111111111", listId, itemId, true)).outcome,
+            )
+            assertEquals(6, fixture.store.snapshot().revision)
+            fixture.reopen()
+            assertEquals(6, fixture.store.snapshot().revision)
+            assertTrue(fixture.store.snapshot().lists.single().itemsList.isEmpty())
+        }
+    }
+
+    private fun createItem(operationId: String, listId: String, itemId: String, text: String): ClientOperation =
+        ClientOperation.newBuilder().setOperationId(operationId)
+            .setCreateItem(CreateItem.newBuilder().setListId(listId).setItemId(itemId).setText(text)).build()
+
     private fun create(operationId: String, listId: String, name: String): ClientOperation =
         ClientOperation.newBuilder().setOperationId(operationId)
             .setCreateList(CreateList.newBuilder().setListId(listId).setName(name)).build()
@@ -96,6 +134,14 @@ class SqliteCanonicalStoreTest {
     private fun rename(operationId: String, listId: String, name: String): ClientOperation =
         ClientOperation.newBuilder().setOperationId(operationId)
             .setRenameList(RenameList.newBuilder().setListId(listId).setName(name)).build()
+
+    private fun setMarked(operationId: String, listId: String, itemId: String, value: Boolean): ClientOperation =
+        ClientOperation.newBuilder().setOperationId(operationId)
+            .setSetMarked(SetMarked.newBuilder().setListId(listId).setItemId(itemId).setValue(value)).build()
+
+    private fun deleteItem(operationId: String, listId: String, itemId: String): ClientOperation =
+        ClientOperation.newBuilder().setOperationId(operationId)
+            .setDeleteItem(DeleteItem.newBuilder().setListId(listId).setItemId(itemId)).build()
 }
 
 private class StoreFixture : AutoCloseable {

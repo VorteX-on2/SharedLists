@@ -3,8 +3,8 @@ package dev.sharedlists.windows
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
-import dev.sharedlists.client.CreateList
 import dev.sharedlists.client.CreateItem
+import dev.sharedlists.client.CreateList
 import dev.sharedlists.client.DeleteItem
 import dev.sharedlists.client.DeleteList
 import dev.sharedlists.client.DeviceSigner
@@ -18,6 +18,7 @@ import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
 import dev.sharedlists.client.RenameList
 import dev.sharedlists.client.ServerEndpoint
+import dev.sharedlists.client.SetMarked
 import dev.sharedlists.client.SharedListsClient
 import dev.sharedlists.client.SharedListId
 import java.io.File
@@ -297,6 +298,14 @@ class WindowsSynchronizationController(
             return
         }
         submit(newText, ITEM_TEXT_LIMIT) { operationId -> EditItemText(itemId, list.id, operationId, newText) }
+    }
+
+    fun setItemMarked(listId: SharedListId, itemId: ListItemId, value: Boolean) {
+        val list = cachedState.lists.firstOrNull { it.id == listId } ?: return
+        if (list.items.none { it.id == itemId }) {
+            return
+        }
+        submit(null) { operationId -> SetMarked(itemId, list.id, operationId, value) }
     }
 
     fun items(listId: SharedListId) = cachedState.lists.firstOrNull { it.id == listId }?.items.orEmpty()

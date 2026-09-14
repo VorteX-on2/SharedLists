@@ -11,6 +11,7 @@ import dev.sharedlists.protocol.ListItem
 import dev.sharedlists.protocol.ListTombstone
 import dev.sharedlists.protocol.OperationOutcome
 import dev.sharedlists.protocol.RenameList
+import dev.sharedlists.protocol.SetMarked
 import dev.sharedlists.protocol.SharedList
 import java.nio.file.Files
 import java.nio.file.Path
@@ -95,6 +96,7 @@ internal class SqliteCanonicalStore(
                     list_name TEXT NOT NULL,
                     item_id TEXT NOT NULL,
                     item_text TEXT NOT NULL,
+                    marked_value INTEGER NOT NULL,
                     outcome INTEGER NOT NULL
                 )
                 """.trimIndent(),
@@ -158,7 +160,7 @@ internal class SqliteCanonicalStore(
     private fun journalAfterLocked(revision: Long): List<JournalEntry> =
         connection.prepareStatement(
             """
-            SELECT revision, operation_id, operation_type, list_id, list_name, item_id, item_text, outcome
+            SELECT revision, operation_id, operation_type, list_id, list_name, item_id, item_text, marked_value, outcome
             FROM operation_journal WHERE revision > ? ORDER BY revision
             """.trimIndent(),
         ).use { statement ->
@@ -184,8 +186,8 @@ internal class SqliteCanonicalStore(
                 connection.prepareStatement(
                     """
                     INSERT INTO operation_journal
-                    (revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, outcome)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, marked_value, outcome)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """.trimIndent(),
                 ).use { statement ->
                     statement.setLong(1, revision)
@@ -196,7 +198,8 @@ internal class SqliteCanonicalStore(
                     statement.setString(6, resolved.name)
                     statement.setString(7, resolved.itemId)
                     statement.setString(8, resolved.itemText)
-                    statement.setInt(9, resolved.outcome.number)
+                    statement.setBoolean(9, resolved.marked)
+                    statement.setInt(10, resolved.outcome.number)
                     statement.executeUpdate()
                 }
                 connection.prepareStatement(
@@ -227,7 +230,7 @@ internal class SqliteCanonicalStore(
     private fun existing(operation: ClientOperation): JournalEntry? =
         connection.prepareStatement(
             """
-            SELECT revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, outcome
+            SELECT revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, marked_value, outcome
             FROM operation_journal WHERE operation_id = ?
             """.trimIndent(),
         ).use { statement ->
@@ -312,6 +315,25 @@ internal class SqliteCanonicalStore(
                         ResolvedOperation(text.outcome, Type.EDIT_ITEM_TEXT, listId, "", itemId, text.value)
                     }
                 }
+            }
+
+            ClientOperation.OperationCase.SET_MARKED -> {
+                validateUuidV4(operation.setMarked.listId, "list ID")
+                validateUuidV4(operation.setMarked.itemId, "item ID")
+                val listId = operation.setMarked.listId
+                val itemId = operation.setMarked.itemId
+                ResolvedOperation(
+                    if (isTombstoned(listId) || !listExists(listId) || isItemTombstoned(itemId) || !itemExists(itemId, listId)) {
+                        OperationOutcome.OPERATION_OUTCOME_IGNORED
+                    } else {
+                        OperationOutcome.OPERATION_OUTCOME_APPLIED
+                    },
+                    Type.SET_MARKED,
+                    listId,
+                    "",
+                    itemId,
+                    marked = operation.setMarked.value,
+                )
             }
 
             ClientOperation.OperationCase.DELETE_ITEM -> {
@@ -413,6 +435,15 @@ internal class SqliteCanonicalStore(
                 "UPDATE list_items SET text = ? WHERE id = ? AND list_id = ?",
             ).use { statement ->
                 statement.setString(1, operation.itemText)
+                statement.setString(2, operation.itemId)
+                statement.setString(3, operation.listId)
+                statement.executeUpdate()
+            }
+
+            Type.SET_MARKED -> connection.prepareStatement(
+                "UPDATE list_items SET marked = ? WHERE id = ? AND list_id = ?",
+            ).use { statement ->
+                statement.setBoolean(1, operation.marked)
                 statement.setString(2, operation.itemId)
                 statement.setString(3, operation.listId)
                 statement.executeUpdate()
@@ -536,6 +567,12 @@ internal class SqliteCanonicalStore(
                 Type.EDIT_ITEM_TEXT -> setEditItemText(
                     EditItemText.newBuilder().setListId(getString("list_id")).setItemId(getString("item_id")).setText(getString("item_text")),
                 )
+                Type.SET_MARKED -> setSetMarked(
+                    SetMarked.newBuilder()
+                        .setListId(getString("list_id"))
+                        .setItemId(getString("item_id"))
+                        .setValue(getBoolean("marked_value")),
+                )
                 Type.DELETE_ITEM -> setDeleteItem(
                     DeleteItem.newBuilder().setListId(getString("list_id")).setItemId(getString("item_id")),
                 )
@@ -554,7 +591,8 @@ internal class SqliteCanonicalStore(
         CREATE_ITEM,
         DELETE_ITEM,
         EDIT_ITEM_TEXT,
-        RENAME;
+        RENAME,
+        SET_MARKED;
 
         companion object {
             fun fromNumber(number: Int): Type = entries[number]
@@ -568,6 +606,7 @@ internal class SqliteCanonicalStore(
         val name: String,
         val itemId: String = "",
         val itemText: String = "",
+        val marked: Boolean = false,
     ) {
         fun toEntry(revision: Long, operationId: String): JournalEntry {
             val operation = ClientOperation.newBuilder().setOperationId(operationId).apply {
@@ -580,6 +619,9 @@ internal class SqliteCanonicalStore(
                     )
                     Type.EDIT_ITEM_TEXT -> setEditItemText(
                         EditItemText.newBuilder().setListId(listId).setItemId(itemId).setText(itemText),
+                    )
+                    Type.SET_MARKED -> setSetMarked(
+                        SetMarked.newBuilder().setListId(listId).setItemId(itemId).setValue(marked),
                     )
                     Type.DELETE_ITEM -> setDeleteItem(
                         DeleteItem.newBuilder().setListId(listId).setItemId(itemId),
@@ -633,6 +675,8 @@ internal class SqliteCanonicalStore(
                 "create-item\u0000${operation.createItem.listId}\u0000${operation.createItem.itemId}\u0000${operation.createItem.text}"
             ClientOperation.OperationCase.EDIT_ITEM_TEXT ->
                 "edit-item-text\u0000${operation.editItemText.listId}\u0000${operation.editItemText.itemId}\u0000${operation.editItemText.text}"
+            ClientOperation.OperationCase.SET_MARKED ->
+                "set-marked\u0000${operation.setMarked.listId}\u0000${operation.setMarked.itemId}\u0000${operation.setMarked.value}"
             ClientOperation.OperationCase.DELETE_ITEM ->
                 "delete-item\u0000${operation.deleteItem.listId}\u0000${operation.deleteItem.itemId}"
             ClientOperation.OperationCase.OPERATION_NOT_SET -> "unset"

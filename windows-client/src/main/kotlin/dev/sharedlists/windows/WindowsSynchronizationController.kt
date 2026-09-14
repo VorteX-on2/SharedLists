@@ -8,13 +8,14 @@ import dev.sharedlists.client.CreateList
 import dev.sharedlists.client.DeleteItem
 import dev.sharedlists.client.DeleteList
 import dev.sharedlists.client.DeviceSigner
-import dev.sharedlists.client.EditItemText
 import dev.sharedlists.client.EditCommand
+import dev.sharedlists.client.EditItemText
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.GrpcSharedListsClient
 import dev.sharedlists.client.ListItem
 import dev.sharedlists.client.ListItemId
+import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
 import dev.sharedlists.client.RenameList
@@ -147,9 +148,14 @@ data class WindowsClientPresentation(
     val statusMessage: String?,
     val setupRequired: Boolean,
     val unreadableDeviceKey: Boolean,
+    val alphabeticalSort: Boolean = false,
+    val hideMarked: Boolean = false,
 ) {
     val editingEnabled: Boolean
         get() = editability == Editability.LIVE
+
+    val reorderingEnabled: Boolean
+        get() = editingEnabled && !alphabeticalSort && !hideMarked
 }
 
 enum class Editability {
@@ -164,8 +170,10 @@ class WindowsSynchronizationController(
     private val synchronizationRunner: SynchronizationRunner = BackgroundSynchronizationRunner,
 ) {
     private var cachedState = CanonicalState()
+    private var alphabeticalSort = false
     private var connectionAttempt = 0L
     private var deviceKeyUnreadable = false
+    private var hideMarked = false
     private var liveClient: SharedListsClient? = null
     private var stateChanged: (WindowsClientPresentation) -> Unit = {}
     private val storedConfiguration = configurationStore.load()
@@ -317,7 +325,30 @@ class WindowsSynchronizationController(
         submit(newText, ITEM_TEXT_LIMIT) { operationId -> EditItemText(itemId, list.id, operationId, newText) }
     }
 
-    fun items(listId: SharedListId) = cachedState.lists.firstOrNull { it.id == listId }?.items.orEmpty()
+    fun items(listId: SharedListId): List<ListItem> =
+        cachedState.lists.firstOrNull { it.id == listId }?.items.orEmpty()
+            .let { items -> if (hideMarked) items.filterNot { it.marked } else items }
+            .let { items -> if (alphabeticalSort) items.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.text }) else items }
+
+    fun moveItem(listId: SharedListId, itemId: ListItemId, destinationIndex: Int) {
+        if (!presentation.reorderingEnabled) {
+            update(presentation.copy(statusMessage = "Reordering is unavailable while sorted, filtered, or disconnected."))
+            return
+        }
+        val items = cachedState.lists.firstOrNull { it.id == listId }?.items ?: return
+        val item = items.firstOrNull { it.id == itemId } ?: return
+        val remaining = items.filterNot { it.id == item.id }
+        val index = destinationIndex.coerceIn(0, remaining.size)
+        submit(null) { operationId ->
+            MoveItem(
+                itemId = item.id,
+                listId = listId,
+                operationId = operationId,
+                predecessorItemId = remaining.getOrNull(index - 1)?.id,
+                successorItemId = remaining.getOrNull(index)?.id,
+            )
+        }
+    }
 
     fun observePresentation(observer: (WindowsClientPresentation) -> Unit) {
         stateChanged = observer
@@ -325,6 +356,16 @@ class WindowsSynchronizationController(
     }
 
     fun presentation(): WindowsClientPresentation = presentation
+
+    fun setAlphabeticalSort(enabled: Boolean) {
+        alphabeticalSort = enabled
+        update(presentation.copy(alphabeticalSort = enabled, statusMessage = presentation.statusMessage))
+    }
+
+    fun setHideMarked(enabled: Boolean) {
+        hideMarked = enabled
+        update(presentation.copy(hideMarked = enabled, statusMessage = presentation.statusMessage))
+    }
 
     fun renameList(currentName: String, newName: String) {
         val list = cachedState.lists.firstOrNull { it.name == currentName } ?: return
@@ -463,6 +504,8 @@ class WindowsSynchronizationController(
                 sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
                 cards = cards(),
                 statusMessage = statusMessage(clientState, isLive),
+                alphabeticalSort = alphabeticalSort,
+                hideMarked = hideMarked,
             ),
         )
         clientState.lastOperationOutcome?.let { outcome ->

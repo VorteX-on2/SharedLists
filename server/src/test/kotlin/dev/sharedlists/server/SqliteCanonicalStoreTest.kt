@@ -5,6 +5,7 @@ import dev.sharedlists.protocol.CreateItem
 import dev.sharedlists.protocol.CreateList
 import dev.sharedlists.protocol.DeleteItem
 import dev.sharedlists.protocol.DeleteList
+import dev.sharedlists.protocol.MoveItem
 import dev.sharedlists.protocol.OperationOutcome
 import dev.sharedlists.protocol.RenameList
 import dev.sharedlists.protocol.SetMarked
@@ -87,6 +88,39 @@ class SqliteCanonicalStoreTest {
 
             assertEquals("STRASSE (2)", collision.operation.createList.name)
         }
+
+        @Test
+        fun `moves use durable canonical anchors with deterministic fallback`() {
+            fixture().use { fixture ->
+                val listId = "11111111-1111-4111-8111-111111111111"
+                val first = "31111111-1111-4111-8111-111111111111"
+                val second = "41111111-1111-4111-8111-111111111111"
+                val third = "51111111-1111-4111-8111-111111111111"
+                fixture.store.submit(create("21111111-1111-4111-8111-111111111111", listId, "Groceries"))
+                listOf(first, second, third).forEachIndexed { index, itemId ->
+                    fixture.store.submit(createItem("6${index}111111-1111-4111-8111-111111111111", listId, itemId, itemId))
+                }
+
+                val move = fixture.store.submit(move("71111111-1111-4111-8111-111111111111", listId, third, "", first))
+                assertEquals(OperationOutcome.OPERATION_OUTCOME_APPLIED, move.outcome)
+                assertEquals(listOf(third, first, second), fixture.store.snapshot().lists.single().itemsList.map { it.id })
+                assertEquals(move, fixture.store.submit(move("71111111-1111-4111-8111-111111111111", listId, third, "", first)))
+
+                fixture.store.submit(move("f1111111-1111-4111-8111-111111111111", listId, first, second, third))
+                assertEquals(listOf(third, second, first), fixture.store.snapshot().lists.single().itemsList.map { it.id })
+                fixture.store.submit(deleteItem("81111111-1111-4111-8111-111111111111", listId, first))
+                fixture.store.submit(move("91111111-1111-4111-8111-111111111111", listId, second, first, third))
+                assertEquals(listOf(second, third), fixture.store.snapshot().lists.single().itemsList.map { it.id })
+                fixture.reopen()
+                assertEquals(listOf(second, third), fixture.store.snapshot().lists.single().itemsList.map { it.id })
+
+                fixture.store.submit(deleteItem("a1111111-1111-4111-8111-111111111111", listId, second))
+                assertEquals(
+                    OperationOutcome.OPERATION_OUTCOME_IGNORED,
+                    fixture.store.submit(move("b1111111-1111-4111-8111-111111111111", listId, second, "", third)).outcome,
+                )
+            }
+        }
     }
 
     @Test
@@ -168,6 +202,21 @@ class SqliteCanonicalStoreTest {
     private fun deleteItem(operationId: String, listId: String, itemId: String): ClientOperation =
         ClientOperation.newBuilder().setOperationId(operationId)
             .setDeleteItem(DeleteItem.newBuilder().setListId(listId).setItemId(itemId)).build()
+
+    private fun move(
+        operationId: String,
+        listId: String,
+        itemId: String,
+        predecessorItemId: String,
+        successorItemId: String,
+    ): ClientOperation =
+        ClientOperation.newBuilder().setOperationId(operationId).setMoveItem(
+            MoveItem.newBuilder().setListId(listId).setItemId(itemId)
+                .also { builder ->
+                    predecessorItemId.takeIf { it.isNotEmpty() }?.let(builder::setPredecessorItemId)
+                    successorItemId.takeIf { it.isNotEmpty() }?.let(builder::setSuccessorItemId)
+                },
+        ).build()
 
     private fun rename(operationId: String, listId: String, name: String): ClientOperation =
         ClientOperation.newBuilder().setOperationId(operationId)

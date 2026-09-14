@@ -8,6 +8,7 @@ import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.ListItem
+import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.ListItemId
 import dev.sharedlists.client.SetMarked
 import dev.sharedlists.client.SharedList
@@ -177,53 +178,52 @@ class WindowsSynchronizationControllerTest {
     }
 
     @Test
-    fun `item presentation submits an explicit marked value only while live`() {
+    fun `local sort and marked filtering do not mutate canonical order or submit operations`() {
         val list = SharedList(
             id = SharedListId.parse("a0000000-0000-4000-8000-000000000001"),
             name = "Groceries",
             items = listOf(
-                ListItem(
-                    id = ListItemId.parse("b0000000-0000-4000-8000-000000000001"),
-                    marked = false,
-                    text = "Milk",
-                ),
+                ListItem(ListItemId.parse("b0000000-0000-4000-8000-000000000001"), text = "Zucchini"),
+                ListItem(ListItemId.parse("c0000000-0000-4000-8000-000000000001"), marked = true, text = "Apples"),
+                ListItem(ListItemId.parse("d0000000-0000-4000-8000-000000000001"), text = "Bananas"),
             ),
         )
         val facade = CapturingSharedListsClient(liveState(CanonicalState(listOf(list))))
         val controller = controller(facade, InMemoryServerConfigurationStore())
-
         controller.connect("192.0.2.10", "8443", FINGERPRINT)
-        controller.setItemMarked(list.id, list.items.single().id, true)
 
-        assertEquals(true, (facade.commands.single() as SetMarked).value)
-        assertEquals(false, controller.items(list.id).single().marked)
+        controller.setAlphabeticalSort(true)
+        assertEquals(listOf("Apples", "Bananas", "Zucchini"), controller.items(list.id).map { it.text })
+        assertFalse(controller.presentation().reorderingEnabled)
+        controller.setHideMarked(true)
+        assertEquals(listOf("Bananas", "Zucchini"), controller.items(list.id).map { it.text })
+        assertTrue(facade.commands.isEmpty())
+
+        controller.setAlphabeticalSort(false)
+        controller.setHideMarked(false)
+        assertEquals(listOf("Zucchini", "Apples", "Bananas"), controller.items(list.id).map { it.text })
     }
 
     @Test
-    fun `card presentation previews at most four unmarked items`() {
+    fun `live full-list reordering submits neighboring anchors`() {
         val list = SharedList(
             id = SharedListId.parse("a0000000-0000-4000-8000-000000000001"),
             name = "Groceries",
-            items = (1..6).map { index ->
-                ListItem(
-                    id = ListItemId.parse("b0000000-0000-4000-8000-00000000000$index"),
-                    marked = index == 1,
-                    text = "Item $index",
-                )
-            },
+            items = listOf(
+                ListItem(ListItemId.parse("b0000000-0000-4000-8000-000000000001"), text = "First"),
+                ListItem(ListItemId.parse("c0000000-0000-4000-8000-000000000001"), text = "Second"),
+                ListItem(ListItemId.parse("d0000000-0000-4000-8000-000000000001"), text = "Third"),
+            ),
         )
         val facade = CapturingSharedListsClient(liveState(CanonicalState(listOf(list))))
         val controller = controller(facade, InMemoryServerConfigurationStore())
-
         controller.connect("192.0.2.10", "8443", FINGERPRINT)
 
-        assertEquals(listOf("Item 2", "Item 3", "Item 4", "Item 5"), controller.presentation().cards.single().unmarkedItems.map { it.text })
-    }
+        controller.moveItem(list.id, list.items[2].id, 0)
 
-    @Test
-    fun `layout mode uses the wide breakpoint`() {
-        assertEquals(WindowsLayoutMode.NARROW, WindowsLayoutMode.forWidth(839))
-        assertEquals(WindowsLayoutMode.WIDE, WindowsLayoutMode.forWidth(840))
+        val command = facade.commands.single() as MoveItem
+        assertNull(command.predecessorItemId)
+        assertEquals(list.items[0].id, command.successorItemId)
     }
 
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =

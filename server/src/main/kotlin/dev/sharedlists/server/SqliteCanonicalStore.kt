@@ -9,6 +9,7 @@ import dev.sharedlists.protocol.EditItemText
 import dev.sharedlists.protocol.JournalEntry
 import dev.sharedlists.protocol.ListItem
 import dev.sharedlists.protocol.ListTombstone
+import dev.sharedlists.protocol.MoveItem
 import dev.sharedlists.protocol.OperationOutcome
 import dev.sharedlists.protocol.RenameList
 import dev.sharedlists.protocol.SetMarked
@@ -17,6 +18,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
+import java.sql.Statement
 import java.text.Normalizer
 import java.util.Locale
 import java.util.UUID
@@ -97,12 +99,24 @@ internal class SqliteCanonicalStore(
                     item_id TEXT NOT NULL,
                     item_text TEXT NOT NULL,
                     marked_value INTEGER NOT NULL,
+                    predecessor_item_id TEXT NOT NULL DEFAULT '',
+                    successor_item_id TEXT NOT NULL DEFAULT '',
                     outcome INTEGER NOT NULL
                 )
                 """.trimIndent(),
             )
             if (!operationJournalColumns().contains("marked_value")) {
                 statement.execute("ALTER TABLE operation_journal ADD COLUMN marked_value INTEGER NOT NULL DEFAULT 0")
+            }
+            val operationJournalColumns = operationJournalColumns()
+            if ("marked_value" !in operationJournalColumns) {
+                statement.execute("ALTER TABLE operation_journal ADD COLUMN marked_value INTEGER NOT NULL DEFAULT 0")
+            }
+            if ("predecessor_item_id" !in operationJournalColumns) {
+                statement.execute("ALTER TABLE operation_journal ADD COLUMN predecessor_item_id TEXT NOT NULL DEFAULT ''")
+            }
+            if ("successor_item_id" !in operationJournalColumns) {
+                statement.execute("ALTER TABLE operation_journal ADD COLUMN successor_item_id TEXT NOT NULL DEFAULT ''")
             }
         }
 
@@ -163,7 +177,8 @@ internal class SqliteCanonicalStore(
     private fun journalAfterLocked(revision: Long): List<JournalEntry> =
         connection.prepareStatement(
             """
-            SELECT revision, operation_id, operation_type, list_id, list_name, item_id, item_text, marked_value, outcome
+            SELECT revision, operation_id, operation_type, list_id, list_name, item_id, item_text,
+                   marked_value, predecessor_item_id, successor_item_id, outcome
             FROM operation_journal WHERE revision > ? ORDER BY revision
             """.trimIndent(),
         ).use { statement ->
@@ -189,8 +204,8 @@ internal class SqliteCanonicalStore(
                 connection.prepareStatement(
                     """
                     INSERT INTO operation_journal
-                    (revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, marked_value, outcome)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, marked_value, predecessor_item_id, successor_item_id, outcome)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """.trimIndent(),
                 ).use { statement ->
                     statement.setLong(1, revision)
@@ -202,7 +217,9 @@ internal class SqliteCanonicalStore(
                     statement.setString(7, resolved.itemId)
                     statement.setString(8, resolved.itemText)
                     statement.setBoolean(9, resolved.marked)
-                    statement.setInt(10, resolved.outcome.number)
+                    statement.setString(10, resolved.predecessorItemId)
+                    statement.setString(11, resolved.successorItemId)
+                    statement.setInt(12, resolved.outcome.number)
                     statement.executeUpdate()
                 }
                 connection.prepareStatement(
@@ -233,7 +250,8 @@ internal class SqliteCanonicalStore(
     private fun existing(operation: ClientOperation): JournalEntry? =
         connection.prepareStatement(
             """
-            SELECT revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, marked_value, outcome
+            SELECT revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text,
+                   marked_value, predecessor_item_id, successor_item_id, outcome
             FROM operation_journal WHERE operation_id = ?
             """.trimIndent(),
         ).use { statement ->
@@ -358,9 +376,60 @@ internal class SqliteCanonicalStore(
                 )
             }
 
+            ClientOperation.OperationCase.MOVE_ITEM -> {
+                validateUuidV4(operation.moveItem.listId, "list ID")
+                validateUuidV4(operation.moveItem.itemId, "item ID")
+                operation.moveItem.predecessorItemId.takeIf { it.isNotEmpty() }?.also { validateUuidV4(it, "predecessor item ID") }
+                operation.moveItem.successorItemId.takeIf { it.isNotEmpty() }?.also { validateUuidV4(it, "successor item ID") }
+                val move = operation.moveItem
+                val anchorsCrossLists = listOf(move.predecessorItemId, move.successorItemId)
+                    .filter { it.isNotEmpty() }
+                    .any { anchor -> itemExists(anchor) && !itemExists(anchor, move.listId) }
+                if (
+                    isTombstoned(move.listId) || !listExists(move.listId) ||
+                    isItemTombstoned(move.itemId) || !itemExists(move.itemId, move.listId)
+                ) {
+                    ResolvedOperation(
+                        if (itemExists(move.itemId)) OperationOutcome.OPERATION_OUTCOME_REJECTED else OperationOutcome.OPERATION_OUTCOME_IGNORED,
+                        Type.MOVE_ITEM,
+                        move.listId,
+                        "",
+                        move.itemId,
+                    )
+                } else if (anchorsCrossLists) {
+                    ResolvedOperation(OperationOutcome.OPERATION_OUTCOME_REJECTED, Type.MOVE_ITEM, move.listId, "", move.itemId)
+                } else {
+                    resolveMove(move)
+                }
+            }
+
             ClientOperation.OperationCase.OPERATION_NOT_SET ->
                 throw IllegalArgumentException("operation is required")
         }
+
+    private fun resolveMove(move: MoveItem): ResolvedOperation {
+        val remaining = items(move.listId).filterNot { it.id == move.itemId }
+        val predecessor = move.predecessorItemId.takeIf { anchor -> remaining.any { it.id == anchor } }
+        val successor = move.successorItemId.takeIf { anchor -> remaining.any { it.id == anchor } }
+        // Prefer an intact adjacent anchor pair; otherwise prefer the surviving predecessor, successor, then end.
+        val insertionIndex = when {
+            predecessor != null && successor != null &&
+                remaining.indexOfFirst { it.id == predecessor } + 1 == remaining.indexOfFirst { it.id == successor } ->
+                remaining.indexOfFirst { it.id == successor }
+            predecessor != null -> remaining.indexOfFirst { it.id == predecessor } + 1
+            successor != null -> remaining.indexOfFirst { it.id == successor }
+            else -> remaining.size
+        }
+        return ResolvedOperation(
+            outcome = OperationOutcome.OPERATION_OUTCOME_APPLIED,
+            type = Type.MOVE_ITEM,
+            listId = move.listId,
+            name = "",
+            itemId = move.itemId,
+            predecessorItemId = remaining.getOrNull(insertionIndex - 1)?.id.orEmpty(),
+            successorItemId = remaining.getOrNull(insertionIndex)?.id.orEmpty(),
+        )
+    }
 
     private fun resolveName(value: String, excludedListId: String? = null): ResolvedName {
         val normalized = Normalizer.normalize(value.trim(), Normalizer.Form.NFC)
@@ -488,6 +557,33 @@ internal class SqliteCanonicalStore(
                     statement.executeUpdate()
                 }
             }
+
+            Type.MOVE_ITEM -> {
+                val orderedIds = items(operation.listId).map { it.id }.filterNot { it == operation.itemId }.toMutableList()
+                val insertionIndex = operation.successorItemId.takeIf { it.isNotEmpty() }
+                    ?.let { successor -> orderedIds.indexOf(successor).takeIf { it >= 0 } }
+                    ?: operation.predecessorItemId.takeIf { it.isNotEmpty() }
+                        ?.let { predecessor -> orderedIds.indexOf(predecessor).takeIf { it >= 0 }?.plus(1) }
+                    ?: orderedIds.size
+                orderedIds.add(insertionIndex, operation.itemId)
+                writePositions(operation.listId, orderedIds)
+            }
+        }
+    }
+
+    private fun writePositions(listId: String, itemIds: List<String>) {
+        connection.prepareStatement("UPDATE list_items SET position = position + 1000000 WHERE list_id = ?").use { statement ->
+            statement.setString(1, listId)
+            statement.executeUpdate()
+        }
+        connection.prepareStatement("UPDATE list_items SET position = ? WHERE id = ? AND list_id = ?").use { statement ->
+            itemIds.forEachIndexed { position, itemId ->
+                statement.setInt(1, position)
+                statement.setString(2, itemId)
+                statement.setString(3, listId)
+                statement.addBatch()
+            }
+            statement.executeBatch()
         }
     }
 
@@ -500,6 +596,20 @@ internal class SqliteCanonicalStore(
                 CanonicalSnapshot(result.getString("generation"), result.getLong("head_revision"))
             }
         }
+
+    private fun addJournalAnchorColumns(statement: Statement) {
+        val columns = statement.executeQuery("PRAGMA table_info(operation_journal)").use { result ->
+            buildSet {
+                while (result.next()) add(result.getString("name"))
+            }
+        }
+        if ("predecessor_item_id" !in columns) {
+            statement.execute("ALTER TABLE operation_journal ADD COLUMN predecessor_item_id TEXT NOT NULL DEFAULT ''")
+        }
+        if ("successor_item_id" !in columns) {
+            statement.execute("ALTER TABLE operation_journal ADD COLUMN successor_item_id TEXT NOT NULL DEFAULT ''")
+        }
+    }
 
     private fun listExists(id: String): Boolean = exists("SELECT 1 FROM shared_lists WHERE id = ?", id)
     private fun isTombstoned(id: String): Boolean = exists("SELECT 1 FROM list_tombstones WHERE list_id = ?", id)
@@ -590,6 +700,13 @@ internal class SqliteCanonicalStore(
                 Type.DELETE_ITEM -> setDeleteItem(
                     DeleteItem.newBuilder().setListId(getString("list_id")).setItemId(getString("item_id")),
                 )
+                Type.MOVE_ITEM -> setMoveItem(
+                    MoveItem.newBuilder().setListId(getString("list_id")).setItemId(getString("item_id"))
+                        .also { move ->
+                            getString("predecessor_item_id").takeIf { it.isNotEmpty() }?.let(move::setPredecessorItemId)
+                            getString("successor_item_id").takeIf { it.isNotEmpty() }?.let(move::setSuccessorItemId)
+                        },
+                )
             }
         }.build()
         return JournalEntry.newBuilder()
@@ -606,7 +723,8 @@ internal class SqliteCanonicalStore(
         DELETE_ITEM,
         EDIT_ITEM_TEXT,
         RENAME,
-        SET_MARKED;
+        SET_MARKED,
+        MOVE_ITEM;
 
         companion object {
             fun fromNumber(number: Int): Type = entries[number]
@@ -621,6 +739,8 @@ internal class SqliteCanonicalStore(
         val itemId: String = "",
         val itemText: String = "",
         val marked: Boolean = false,
+        val predecessorItemId: String = "",
+        val successorItemId: String = "",
     ) {
         fun toEntry(revision: Long, operationId: String): JournalEntry {
             val operation = ClientOperation.newBuilder().setOperationId(operationId).apply {
@@ -639,6 +759,12 @@ internal class SqliteCanonicalStore(
                     )
                     Type.DELETE_ITEM -> setDeleteItem(
                         DeleteItem.newBuilder().setListId(listId).setItemId(itemId),
+                    )
+                    Type.MOVE_ITEM -> setMoveItem(
+                        MoveItem.newBuilder().setListId(listId).setItemId(itemId).also { move ->
+                            predecessorItemId.takeIf { it.isNotEmpty() }?.let(move::setPredecessorItemId)
+                            successorItemId.takeIf { it.isNotEmpty() }?.let(move::setSuccessorItemId)
+                        },
                     )
                 }
             }.build()
@@ -693,6 +819,8 @@ internal class SqliteCanonicalStore(
                 "set-marked\u0000${operation.setMarked.listId}\u0000${operation.setMarked.itemId}\u0000${operation.setMarked.value}"
             ClientOperation.OperationCase.DELETE_ITEM ->
                 "delete-item\u0000${operation.deleteItem.listId}\u0000${operation.deleteItem.itemId}"
+            ClientOperation.OperationCase.MOVE_ITEM ->
+                "move-item\u0000${operation.moveItem.listId}\u0000${operation.moveItem.itemId}\u0000${operation.moveItem.predecessorItemId}\u0000${operation.moveItem.successorItemId}"
             ClientOperation.OperationCase.OPERATION_NOT_SET -> "unset"
         }
 }

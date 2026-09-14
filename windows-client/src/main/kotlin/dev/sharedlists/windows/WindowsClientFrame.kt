@@ -1,5 +1,6 @@
 package dev.sharedlists.windows
 
+import dev.sharedlists.client.ListItem
 import dev.sharedlists.client.ListItemId
 import java.awt.BorderLayout
 import java.awt.CardLayout
@@ -8,6 +9,8 @@ import java.awt.FlowLayout
 import java.awt.event.ActionListener
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.io.File
 import javax.swing.BorderFactory
 import javax.swing.JButton
@@ -35,6 +38,7 @@ class WindowsClientFrame(
     private val createDeviceKeyButton = JButton("Set up device")
     private val deleteListButton = JButton("Delete list")
     private val deleteItemButton = JButton("Delete item")
+    private val hideMarkedCheckBox = JCheckBox("Hide marked")
     private val emptyStateLabel = JLabel()
     private val fingerprintField = JTextField(64)
     private val hostField = JTextField(18)
@@ -47,6 +51,9 @@ class WindowsClientFrame(
     private val itemModel = DefaultListModel<WindowsItemRow>()
     private val itemTextField = JTextField()
     private val itemView = JList(itemModel)
+    private var itemDragStartIndex = -1
+    private val moveDownButton = JButton("Move down")
+    private val moveUpButton = JButton("Move up")
     private val portField = JTextField(5)
     private val quickAddButton = JButton("Quick add")
     private val quickMarkButton = JButton("Quick mark")
@@ -55,6 +62,7 @@ class WindowsClientFrame(
     private val editItemButton = JButton("Edit item")
     private val retryDeviceKeyButton = JButton("Retry device key")
     private val statusLabel = JLabel()
+    private val alphabeticalSortCheckBox = JCheckBox("Sort A–Z")
 
     init {
         defaultCloseOperation = EXIT_ON_CLOSE
@@ -103,7 +111,13 @@ class WindowsClientFrame(
         deleteItemButton.addActionListener(ActionListener { deleteSelectedItem() })
         editItemButton.addActionListener(ActionListener { editSelectedItem() })
         markedCheckBox.addActionListener(ActionListener { setSelectedItemMarked() })
+        hideMarkedCheckBox.addActionListener(ActionListener { controller.setHideMarked(hideMarkedCheckBox.isSelected) })
+        moveDownButton.addActionListener(ActionListener { moveSelectedItem(1) })
+        moveUpButton.addActionListener(ActionListener { moveSelectedItem(-1) })
         renameListButton.addActionListener(ActionListener { renameSelectedList() })
+        alphabeticalSortCheckBox.addActionListener(
+            ActionListener { controller.setAlphabeticalSort(alphabeticalSortCheckBox.isSelected) },
+        )
         retryDeviceKeyButton.addActionListener(ActionListener { controller.retryDeviceKey() })
         listView.addListSelectionListener { renderItems() }
         narrowCardView.addListSelectionListener { selectNarrowCard() }
@@ -111,6 +125,25 @@ class WindowsClientFrame(
             itemTextField.text = itemView.selectedValue?.text.orEmpty()
             markedCheckBox.isSelected = itemView.selectedValue?.marked ?: false
         }
+        itemView.addMouseListener(
+            object : MouseAdapter() {
+                override fun mousePressed(event: MouseEvent) {
+                    itemDragStartIndex = if (controller.presentation().reorderingEnabled) {
+                        itemView.locationToIndex(event.point)
+                    } else {
+                        -1
+                    }
+                }
+
+                override fun mouseReleased(event: MouseEvent) {
+                    val destinationIndex = itemView.locationToIndex(event.point)
+                    if (itemDragStartIndex >= 0 && destinationIndex >= 0 && destinationIndex != itemDragStartIndex) {
+                        moveSelectedItem(itemDragStartIndex, destinationIndex)
+                    }
+                    itemDragStartIndex = -1
+                }
+            },
+        )
         controller.observePresentation(::render)
         addComponentListener(
             object : ComponentAdapter() {
@@ -143,6 +176,10 @@ class WindowsClientFrame(
             add(deleteListButton)
             add(editItemButton)
             add(deleteItemButton)
+            add(moveUpButton)
+            add(moveDownButton)
+            add(alphabeticalSortCheckBox)
+            add(hideMarkedCheckBox)
         }
 
     private fun contentPanel(): JPanel =
@@ -211,6 +248,12 @@ class WindowsClientFrame(
             quickAddButton.isEnabled = presentation.editingEnabled && narrowCardView.selectedValue != null
             quickMarkButton.isEnabled =
                 presentation.editingEnabled && narrowCardView.selectedValue?.unmarkedItems?.isNotEmpty() == true
+            alphabeticalSortCheckBox.isSelected = presentation.alphabeticalSort
+            hideMarkedCheckBox.isSelected = presentation.hideMarked
+            alphabeticalSortCheckBox.isEnabled = presentation.editingEnabled
+            hideMarkedCheckBox.isEnabled = presentation.editingEnabled
+            moveUpButton.isEnabled = presentation.reorderingEnabled && itemView.selectedIndex > 0
+            moveDownButton.isEnabled = presentation.reorderingEnabled && itemView.selectedIndex in 0 until itemModel.size - 1
             createDeviceKeyButton.isVisible = presentation.setupRequired
             exportDeviceKeyButton.isVisible = presentation.exportRequired
             resetDeviceButton.isVisible = !presentation.setupRequired && !presentation.unreadableDeviceKey
@@ -303,6 +346,18 @@ class WindowsClientFrame(
 
     private fun renderLayout() {
         cardsLayout.show(cardsPanel, WindowsLayoutMode.forWidth(width).cardName)
+    }
+
+    private fun moveSelectedItem(offset: Int) {
+        val list = listView.selectedValue ?: return
+        val item = itemView.selectedValue ?: return
+        controller.moveItem(list.id, item.id, itemView.selectedIndex + offset)
+    }
+
+    private fun moveSelectedItem(sourceIndex: Int, destinationIndex: Int) {
+        val list = listView.selectedValue ?: return
+        val item = itemModel.getElementAt(sourceIndex)
+        controller.moveItem(list.id, item.id, destinationIndex)
     }
 
     private fun renameSelectedList() {

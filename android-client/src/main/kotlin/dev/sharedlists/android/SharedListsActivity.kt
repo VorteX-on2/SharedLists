@@ -19,12 +19,14 @@ import android.widget.ScrollView
 import android.widget.TextView
 import dev.sharedlists.client.SharedList
 import dev.sharedlists.client.EnrollmentState
+import dev.sharedlists.client.SharedListId
 
 class SharedListsActivity : Activity() {
     private lateinit var controller: AndroidSynchronizationController
     private lateinit var content: LinearLayout
     private lateinit var status: TextView
     private lateinit var networkCallback: ConnectivityManager.NetworkCallback
+    private var selectedListId: SharedListId? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,10 +102,51 @@ class SharedListsActivity : Activity() {
             addText("No shared lists yet.")
             return
         }
-        lists.forEach { list ->
-            addButton(list.name) { showList(list) }
-            list.items.filterNot { it.marked }.take(4).forEach { item -> addText(item.text) }
+        if (resources.configuration.screenWidthDp >= WIDE_LAYOUT_MINIMUM_DP) {
+            addWideListDetail(lists)
+        } else {
+            lists.forEach { list ->
+                addButton(list.name) { showList(list) }
+                list.items.filterNot { it.marked }.take(4).forEach { item -> addText(item.text) }
+            }
         }
+    }
+
+    private fun addWideListDetail(lists: List<SharedList>) {
+        val selected = lists.firstOrNull { it.id == selectedListId } ?: lists.first()
+        selectedListId = selected.id
+        content.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            contentDescription = "Shared lists and selected list detail"
+            addView(LinearLayout(this@SharedListsActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                lists.forEach { list ->
+                    addView(Button(this@SharedListsActivity).apply {
+                        text = list.name
+                        isAllCaps = false
+                        setOnClickListener {
+                            selectedListId = list.id
+                            controller.observe(::render)
+                        }
+                    })
+                }
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(LinearLayout(this@SharedListsActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(this@SharedListsActivity).apply { text = selected.name; textSize = 22f })
+                selected.items.forEach { item ->
+                    addView(Button(this@SharedListsActivity).apply {
+                        text = if (item.marked) "✓ ${item.text}" else item.text
+                        contentDescription = "Edit ${item.text}"
+                        setOnClickListener { prompt("Edit item", item.text) { controller.editItemText(selected.id, item.id, it) } }
+                    })
+                }
+                addView(Button(this@SharedListsActivity).apply {
+                    text = "Open list controls"
+                    setOnClickListener { showList(selected) }
+                })
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
+        })
     }
 
     private fun showList(list: SharedList) {
@@ -192,5 +235,9 @@ class SharedListsActivity : Activity() {
             putExtra(Intent.EXTRA_TEXT, pem)
             putExtra(Intent.EXTRA_TITLE, fileName)
         }, "Share device public key"))
+    }
+
+    private companion object {
+        const val WIDE_LAYOUT_MINIMUM_DP = 840
     }
 }

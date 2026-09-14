@@ -30,14 +30,18 @@ internal class SharedListsService(
         }
 
     override fun sync(requests: Flow<SyncRequest>): Flow<SyncResponse> = channelFlow {
+        val events = Channel<Event>(MAXIMUM_QUEUED_EVENTS)
         var phase = Phase.OPENING
         var generation = ""
         var lastAcknowledgedRevision = -1L
         var synchronizedRevision = -1L
         var lastDeliveredRevision = -1L
-        val events = Channel<Event>(Channel.UNLIMITED)
         val journalJob = launch(start = CoroutineStart.UNDISPATCHED) {
-            store.journalEntries.collect { events.send(Event.Journal(it)) }
+            store.journalEntries.collect { entry ->
+                if (events.trySend(Event.Journal(entry)).isFailure) {
+                    events.close(SlowConsumerException())
+                }
+            }
         }
         val requestJob = launch {
             try {
@@ -50,8 +54,9 @@ internal class SharedListsService(
             for (event in events) {
                 when (event) {
                     is Event.Journal -> if (phase == Phase.LIVE && event.entry.revision > lastDeliveredRevision) {
-                        send(journal(generation, event.entry))
-                        lastDeliveredRevision = event.entry.revision
+                        val entries = store.journalAfter(lastDeliveredRevision)
+                        send(journal(generation, entries))
+                        lastDeliveredRevision = entries.last().revision
                     }
 
                     is Event.Request -> when (phase) {
@@ -123,10 +128,11 @@ internal class SharedListsService(
                             }
                         }
                     }
-
                     Event.Closed -> break
                 }
             }
+        } catch (_: SlowConsumerException) {
+            throw Status.RESOURCE_EXHAUSTED.withDescription("slow consumer overflow").asRuntimeException()
         } finally {
             journalJob.cancel()
             requestJob.cancel()
@@ -208,5 +214,11 @@ internal class SharedListsService(
         OPENING,
         SYNCING,
         LIVE,
+    }
+
+    private class SlowConsumerException : Exception()
+
+    private companion object {
+        const val MAXIMUM_QUEUED_EVENTS = 128
     }
 }

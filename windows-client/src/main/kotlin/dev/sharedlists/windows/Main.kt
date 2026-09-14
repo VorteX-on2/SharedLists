@@ -5,11 +5,15 @@ import java.util.ServiceLoader
 
 fun main() {
     EventQueue.invokeLater {
-        val signer = ServiceLoader.load(WindowsDeviceSignerProvider::class.java)
+        val enrollment = WindowsCngDeviceEnrollment()
+        val providedSigner = ServiceLoader.load(WindowsDeviceSignerProvider::class.java)
             .findFirst()
             .orElse(null)
             ?.load()
-        val controller = WindowsSynchronizationController(WindowsGrpcClientFactory(signer))
+        val controller = WindowsSynchronizationController(
+            clientFactory = WindowsGrpcClientFactory(deviceSigner = { providedSigner ?: enrollment.current() }),
+            deviceEnrollment = if (providedSigner == null) enrollment else null,
+        )
         WindowsClientFrame(controller).isVisible = true
     }
 }

@@ -6,6 +6,7 @@ import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
+import java.awt.Point
 import java.awt.event.ActionListener
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
@@ -51,7 +52,7 @@ class WindowsClientFrame(
     private val itemModel = DefaultListModel<WindowsItemRow>()
     private val itemTextField = JTextField()
     private val itemView = JList(itemModel)
-    private var itemDragStartIndex = -1
+    private val itemReorderGesture = WindowsItemReorderGesture()
     private val moveDownButton = JButton("Move down")
     private val moveUpButton = JButton("Move up")
     private val portField = JTextField(5)
@@ -128,19 +129,17 @@ class WindowsClientFrame(
         itemView.addMouseListener(
             object : MouseAdapter() {
                 override fun mousePressed(event: MouseEvent) {
-                    itemDragStartIndex = if (controller.presentation().reorderingEnabled) {
-                        itemView.locationToIndex(event.point)
+                    if (controller.presentation().reorderingEnabled) {
+                        itemReorderGesture.begin(itemView, event.point)
                     } else {
-                        -1
+                        itemReorderGesture.cancel()
                     }
                 }
 
                 override fun mouseReleased(event: MouseEvent) {
-                    val destinationIndex = itemView.locationToIndex(event.point)
-                    if (itemDragStartIndex >= 0 && destinationIndex >= 0 && destinationIndex != itemDragStartIndex) {
-                        moveSelectedItem(itemDragStartIndex, destinationIndex)
+                    itemReorderGesture.finish(itemView, event.point)?.let { (sourceIndex, destinationIndex) ->
+                        moveSelectedItem(sourceIndex, destinationIndex)
                     }
-                    itemDragStartIndex = -1
                 }
             },
         )
@@ -266,6 +265,7 @@ class WindowsClientFrame(
             }
             renderLayout()
         }
+
         if (SwingUtilities.isEventDispatchThread()) {
             applyPresentation()
         } else {
@@ -398,4 +398,32 @@ enum class WindowsLayoutMode(
         fun forWidth(width: Int): WindowsLayoutMode =
             if (width >= WIDE_BREAKPOINT) WIDE else NARROW
     }
+}
+
+internal class WindowsItemReorderGesture {
+    private var sourceIndex = -1
+
+    fun begin(itemView: JList<*>, point: Point) {
+        sourceIndex = itemIndexAt(itemView, point)
+    }
+
+    fun finish(itemView: JList<*>, point: Point): Pair<Int, Int>? {
+        val destinationIndex = itemIndexAt(itemView, point)
+        val result = if (sourceIndex >= 0 && destinationIndex >= 0 && sourceIndex != destinationIndex) {
+            sourceIndex to destinationIndex
+        } else {
+            null
+        }
+        sourceIndex = -1
+        return result
+    }
+
+    fun cancel() {
+        sourceIndex = -1
+    }
+
+    private fun itemIndexAt(itemView: JList<*>, point: Point): Int =
+        itemView.locationToIndex(point).takeIf { index ->
+            index >= 0 && itemView.getCellBounds(index, index)?.contains(point) == true
+        } ?: -1
 }

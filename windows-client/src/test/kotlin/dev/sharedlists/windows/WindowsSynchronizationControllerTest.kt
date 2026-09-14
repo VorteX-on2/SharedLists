@@ -15,7 +15,10 @@ import dev.sharedlists.client.SharedList
 import dev.sharedlists.client.SharedListId
 import dev.sharedlists.client.SharedListsClient
 import dev.sharedlists.client.SynchronizationCursor
+import java.awt.Point
 import java.io.File
+import javax.swing.DefaultListModel
+import javax.swing.JList
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.suspendCoroutine
 import kotlin.test.Test
@@ -224,6 +227,26 @@ class WindowsSynchronizationControllerTest {
         val command = facade.commands.single() as MoveItem
         assertNull(command.predecessorItemId)
         assertEquals(list.items[0].id, command.successorItemId)
+    }
+
+    @Test
+    fun `dragging a list row yields a move but empty space does not`() {
+        val model = DefaultListModel<String>().apply {
+            addElement("First")
+            addElement("Second")
+        }
+        val itemView = JList(model).apply {
+            fixedCellHeight = 20
+            fixedCellWidth = 100
+            setSize(100, 40)
+        }
+        val gesture = WindowsItemReorderGesture()
+
+        gesture.begin(itemView, Point(10, 10))
+        assertEquals(0 to 1, gesture.finish(itemView, Point(10, 30)))
+
+        gesture.begin(itemView, Point(10, 60))
+        assertNull(gesture.finish(itemView, Point(10, 10)))
     }
 
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =

@@ -150,6 +150,13 @@ data class EditItemText(
     val text: String,
 ) : EditCommand
 
+data class SetMarked(
+    val itemId: ListItemId,
+    val listId: SharedListId,
+    override val operationId: OperationId,
+    val value: Boolean,
+) : EditCommand
+
 interface SharedListsClient {
     suspend fun synchronize(): ClientState
 

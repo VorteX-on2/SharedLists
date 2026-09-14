@@ -98,6 +98,12 @@ message EditItemText {
   string text = 3;
 }
 
+message SetMarked {
+  string list_id = 1;
+  string item_id = 2;
+  bool value = 3;
+}
+
 message DeleteItem {
   string list_id = 1;
   string item_id = 2;
@@ -112,6 +118,7 @@ message ClientOperation {
     CreateItem create_item = 5;
     EditItemText edit_item_text = 6;
     DeleteItem delete_item = 7;
+    SetMarked set_marked = 8;
   }
 }
 

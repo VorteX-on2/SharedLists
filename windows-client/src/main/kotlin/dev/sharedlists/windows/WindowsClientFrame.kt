@@ -2,13 +2,17 @@ package dev.sharedlists.windows
 
 import dev.sharedlists.client.ListItemId
 import java.awt.BorderLayout
+import java.awt.CardLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.event.ActionListener
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.io.File
 import javax.swing.BorderFactory
 import javax.swing.JButton
 import javax.swing.DefaultListModel
+import javax.swing.JCheckBox
 import javax.swing.JFileChooser
 import javax.swing.JFrame
 import javax.swing.JLabel
@@ -23,6 +27,8 @@ import javax.swing.SwingUtilities
 class WindowsClientFrame(
     private val controller: WindowsSynchronizationController,
 ) : JFrame("Shared Lists") {
+    private val cardsLayout = CardLayout()
+    private val cardsPanel = JPanel(cardsLayout)
     private val connectButton = JButton("Connect")
     private val createListButton = JButton("Create list")
     private val createItemButton = JButton("Add item")
@@ -35,10 +41,15 @@ class WindowsClientFrame(
     private val exportDeviceKeyButton = JButton("Export public key")
     private val listModel = DefaultListModel<WindowsListRow>()
     private val listView = JList(listModel)
+    private val markedCheckBox = JCheckBox("Marked")
+    private val narrowCardModel = DefaultListModel<WindowsListCard>()
+    private val narrowCardView = JList(narrowCardModel)
     private val itemModel = DefaultListModel<WindowsItemRow>()
     private val itemTextField = JTextField()
     private val itemView = JList(itemModel)
     private val portField = JTextField(5)
+    private val quickAddButton = JButton("Quick add")
+    private val quickMarkButton = JButton("Quick mark")
     private val resetDeviceButton = JButton("Reset device setup")
     private val renameListButton = JButton("Rename list")
     private val editItemButton = JButton("Edit item")
@@ -57,6 +68,8 @@ class WindowsClientFrame(
         )
         createListButton.addActionListener(ActionListener { createList() })
         createItemButton.addActionListener(ActionListener { createItem() })
+        quickAddButton.addActionListener(ActionListener { quickAddItem() })
+        quickMarkButton.addActionListener(ActionListener { quickMarkItem() })
         createDeviceKeyButton.addActionListener(
             ActionListener {
                 if (
@@ -89,11 +102,23 @@ class WindowsClientFrame(
         deleteListButton.addActionListener(ActionListener { deleteSelectedList() })
         deleteItemButton.addActionListener(ActionListener { deleteSelectedItem() })
         editItemButton.addActionListener(ActionListener { editSelectedItem() })
+        markedCheckBox.addActionListener(ActionListener { setSelectedItemMarked() })
         renameListButton.addActionListener(ActionListener { renameSelectedList() })
         retryDeviceKeyButton.addActionListener(ActionListener { controller.retryDeviceKey() })
         listView.addListSelectionListener { renderItems() }
-        itemView.addListSelectionListener { itemTextField.text = itemView.selectedValue?.text.orEmpty() }
+        narrowCardView.addListSelectionListener { selectNarrowCard() }
+        itemView.addListSelectionListener {
+            itemTextField.text = itemView.selectedValue?.text.orEmpty()
+            markedCheckBox.isSelected = itemView.selectedValue?.marked ?: false
+        }
         controller.observePresentation(::render)
+        addComponentListener(
+            object : ComponentAdapter() {
+                override fun componentResized(event: ComponentEvent) {
+                    renderLayout()
+                }
+            },
+        )
         pack()
         setLocationByPlatform(true)
     }
@@ -125,22 +150,37 @@ class WindowsClientFrame(
             border = BorderFactory.createEmptyBorder(6, 12, 12, 12)
             add(statusLabel, BorderLayout.NORTH)
             add(JPanel(BorderLayout(12, 0)).apply {
-                add(
-                    JScrollPane(
-                        listView.apply { selectionMode = ListSelectionModel.SINGLE_SELECTION },
-                    ),
-                    BorderLayout.WEST,
+                cardsPanel.add(
+                    JScrollPane(narrowCardView.apply { selectionMode = ListSelectionModel.SINGLE_SELECTION }),
+                    WindowsLayoutMode.NARROW.cardName,
                 )
-                add(
-                    JScrollPane(
-                        itemView.apply { selectionMode = ListSelectionModel.SINGLE_SELECTION },
-                    ),
-                    BorderLayout.CENTER,
+                cardsPanel.add(
+                    JPanel(BorderLayout(12, 0)).apply {
+                        add(
+                            JScrollPane(
+                                listView.apply { selectionMode = ListSelectionModel.SINGLE_SELECTION },
+                            ),
+                            BorderLayout.WEST,
+                        )
+                        add(
+                            JScrollPane(
+                                itemView.apply { selectionMode = ListSelectionModel.SINGLE_SELECTION },
+                            ),
+                            BorderLayout.CENTER,
+                        )
+                    },
+                    WindowsLayoutMode.WIDE.cardName,
                 )
+                add(cardsPanel, BorderLayout.CENTER)
             }, BorderLayout.CENTER)
             add(JPanel(BorderLayout(0, 6)).apply {
                 add(itemTextField, BorderLayout.NORTH)
                 add(emptyStateLabel, BorderLayout.SOUTH)
+                add(markedCheckBox, BorderLayout.CENTER)
+                add(JPanel(FlowLayout(FlowLayout.LEADING)).apply {
+                    add(quickAddButton)
+                    add(quickMarkButton)
+                }, BorderLayout.EAST)
             }, BorderLayout.SOUTH)
         }
 
@@ -154,6 +194,8 @@ class WindowsClientFrame(
             }
             listModel.clear()
             presentation.sharedLists.forEach(listModel::addElement)
+            narrowCardModel.clear()
+            presentation.cards.forEach(narrowCardModel::addElement)
             renderItems()
             emptyStateLabel.text = presentation.emptyStateMessage.orEmpty()
             statusLabel.text = presentation.statusMessage.orEmpty()
@@ -165,6 +207,10 @@ class WindowsClientFrame(
             editItemButton.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
             deleteItemButton.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
             itemTextField.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
+            markedCheckBox.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
+            quickAddButton.isEnabled = presentation.editingEnabled && narrowCardView.selectedValue != null
+            quickMarkButton.isEnabled =
+                presentation.editingEnabled && narrowCardView.selectedValue?.unmarkedItems?.isNotEmpty() == true
             createDeviceKeyButton.isVisible = presentation.setupRequired
             exportDeviceKeyButton.isVisible = presentation.exportRequired
             resetDeviceButton.isVisible = !presentation.setupRequired && !presentation.unreadableDeviceKey
@@ -175,6 +221,7 @@ class WindowsClientFrame(
             if (shouldOpenExportDialog) {
                 exportPublicKey()
             }
+            renderLayout()
         }
         if (SwingUtilities.isEventDispatchThread()) {
             applyPresentation()
@@ -205,6 +252,18 @@ class WindowsClientFrame(
         controller.createItem(list.id, text)
     }
 
+    private fun quickAddItem() {
+        val card = narrowCardView.selectedValue ?: return
+        val text = JOptionPane.showInputDialog(this, "Item text", "Quick add item", JOptionPane.PLAIN_MESSAGE) ?: return
+        controller.createItem(card.id, text)
+    }
+
+    private fun quickMarkItem() {
+        val card = narrowCardView.selectedValue ?: return
+        val item = card.unmarkedItems.firstOrNull() ?: return
+        controller.setItemMarked(card.id, item.id, true)
+    }
+
     private fun deleteSelectedList() {
         val list = listView.selectedValue ?: return
         if (
@@ -231,26 +290,57 @@ class WindowsClientFrame(
         controller.editItemText(list.id, item.id, itemTextField.text)
     }
 
+    private fun renderItems() {
+        itemModel.clear()
+        itemTextField.text = ""
+        markedCheckBox.isSelected = false
+        listView.selectedValue?.let { list ->
+            controller.items(list.id).forEach { item ->
+                itemModel.addElement(WindowsItemRow(item.id, item.marked, item.text))
+            }
+        }
+    }
+
+    private fun renderLayout() {
+        cardsLayout.show(cardsPanel, WindowsLayoutMode.forWidth(width).cardName)
+    }
+
     private fun renameSelectedList() {
         val currentName = listView.selectedValue?.name ?: return
         val name = JOptionPane.showInputDialog(this, "List name", currentName) ?: return
         controller.renameList(currentName, name)
     }
 
-    private fun renderItems() {
-        itemModel.clear()
-        itemTextField.text = ""
-        listView.selectedValue?.let { list ->
-            controller.items(list.id).forEach { item ->
-                itemModel.addElement(WindowsItemRow(item.id, item.text))
-            }
-        }
+    private fun selectNarrowCard() {
+        val card = narrowCardView.selectedValue ?: return
+        listView.setSelectedValue(WindowsListRow(card.id, card.name), true)
+    }
+
+    private fun setSelectedItemMarked() {
+        val list = listView.selectedValue ?: return
+        val item = itemView.selectedValue ?: return
+        controller.setItemMarked(list.id, item.id, markedCheckBox.isSelected)
     }
 
     private data class WindowsItemRow(
         val id: ListItemId,
+        val marked: Boolean,
         val text: String,
     ) {
-        override fun toString(): String = text
+        override fun toString(): String = if (marked) "[marked] $text" else text
+    }
+}
+
+enum class WindowsLayoutMode(
+    val cardName: String,
+) {
+    NARROW("narrow"),
+    WIDE("wide");
+
+    companion object {
+        private const val WIDE_BREAKPOINT = 840
+
+        fun forWidth(width: Int): WindowsLayoutMode =
+            if (width >= WIDE_BREAKPOINT) WIDE else NARROW
     }
 }

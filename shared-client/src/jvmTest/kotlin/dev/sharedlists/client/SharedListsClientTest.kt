@@ -31,6 +31,7 @@ class SharedListsClientTest {
                     items = listOf(
                         ListItem(
                             id = ListItemId.parse("21111111-1111-4111-8111-111111111111"),
+                            marked = true,
                             text = "Milk",
                         ),
                     ),

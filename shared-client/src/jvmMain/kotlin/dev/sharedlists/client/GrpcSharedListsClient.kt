@@ -13,6 +13,7 @@ import dev.sharedlists.protocol.Live
 import dev.sharedlists.protocol.OpenSync
 import dev.sharedlists.protocol.OperationOutcome as ProtoOperationOutcome
 import dev.sharedlists.protocol.RenameList as ProtoRenameList
+import dev.sharedlists.protocol.SetMarked as ProtoSetMarked
 import dev.sharedlists.protocol.SharedListsGrpcKt
 import dev.sharedlists.protocol.SubmitOperation
 import dev.sharedlists.protocol.SyncRequest
@@ -104,7 +105,7 @@ class FileClientStateStore(
                             items = (0 until properties.getProperty("list.$index.item.count", "0").toInt()).map { itemIndex ->
                                 ListItem(
                                     id = ListItemId.parse(requireNotNull(properties.getProperty("list.$index.item.$itemIndex.id"))),
-                                    marked = requireNotNull(properties.getProperty("list.$index.item.$itemIndex.marked")).toBoolean(),
+                                    marked = properties.getProperty("list.$index.item.$itemIndex.marked", "false").toBoolean(),
                                     text = requireNotNull(properties.getProperty("list.$index.item.$itemIndex.text")),
                                 )
                             },
@@ -373,6 +374,20 @@ class GrpcSharedListsClient(
                             )
                         }
                     }
+                    ClientOperation.OperationCase.SET_MARKED -> {
+                        val index = lists.indexOfFirst { it.id.value == operation.setMarked.listId }
+                        if (index >= 0) {
+                            lists[index] = lists[index].copy(
+                                items = lists[index].items.map { item ->
+                                    if (item.id.value == operation.setMarked.itemId) {
+                                        item.copy(marked = operation.setMarked.value)
+                                    } else {
+                                        item
+                                    }
+                                },
+                            )
+                        }
+                    }
                     ClientOperation.OperationCase.DELETE_LIST -> lists.removeAll { it.id.value == operation.deleteList.listId }
                     ClientOperation.OperationCase.OPERATION_NOT_SET -> error("Journal entry has no operation.")
                 }
@@ -423,6 +438,12 @@ class GrpcSharedListsClient(
                             .setText(text),
                     )
                     is RenameList -> setRenameList(ProtoRenameList.newBuilder().setListId(listId.value).setName(name))
+                    is SetMarked -> setSetMarked(
+                        ProtoSetMarked.newBuilder()
+                            .setItemId(itemId.value)
+                            .setListId(listId.value)
+                            .setValue(value),
+                    )
                 }
             }.build()
     }

@@ -1,9 +1,13 @@
 package dev.sharedlists.server
 
 import dev.sharedlists.protocol.ClientOperation
+import dev.sharedlists.protocol.CreateItem
 import dev.sharedlists.protocol.CreateList
+import dev.sharedlists.protocol.DeleteItem
 import dev.sharedlists.protocol.DeleteList
+import dev.sharedlists.protocol.EditItemText
 import dev.sharedlists.protocol.JournalEntry
+import dev.sharedlists.protocol.ListItem
 import dev.sharedlists.protocol.ListTombstone
 import dev.sharedlists.protocol.OperationOutcome
 import dev.sharedlists.protocol.RenameList
@@ -45,6 +49,26 @@ internal class SqliteCanonicalStore(
             )
             statement.execute(
                 """
+                CREATE TABLE IF NOT EXISTS list_items (
+                    id TEXT PRIMARY KEY,
+                    list_id TEXT NOT NULL REFERENCES shared_lists(id) ON DELETE CASCADE,
+                    text TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    marked INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE (list_id, position)
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS item_tombstones (
+                    item_id TEXT PRIMARY KEY,
+                    deleted_revision INTEGER NOT NULL
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
                 CREATE TABLE IF NOT EXISTS shared_lists (
                     id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
@@ -69,11 +93,14 @@ internal class SqliteCanonicalStore(
                     operation_type INTEGER NOT NULL,
                     list_id TEXT NOT NULL,
                     list_name TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    item_text TEXT NOT NULL,
                     outcome INTEGER NOT NULL
                 )
                 """.trimIndent(),
             )
         }
+
         connection.prepareStatement(
             "INSERT OR IGNORE INTO synchronization_metadata (singleton, generation, head_revision) VALUES (1, ?, 0)",
         ).use { statement ->
@@ -94,6 +121,7 @@ internal class SqliteCanonicalStore(
                             SharedList.newBuilder()
                                 .setId(result.getString("id"))
                                 .setName(result.getString("display_name"))
+                                .addAllItems(items(result.getString("id")))
                                 .build(),
                         )
                     }
@@ -130,7 +158,7 @@ internal class SqliteCanonicalStore(
     private fun journalAfterLocked(revision: Long): List<JournalEntry> =
         connection.prepareStatement(
             """
-            SELECT revision, operation_id, operation_type, list_id, list_name, outcome
+            SELECT revision, operation_id, operation_type, list_id, list_name, item_id, item_text, outcome
             FROM operation_journal WHERE revision > ? ORDER BY revision
             """.trimIndent(),
         ).use { statement ->
@@ -156,8 +184,8 @@ internal class SqliteCanonicalStore(
                 connection.prepareStatement(
                     """
                     INSERT INTO operation_journal
-                    (revision, operation_id, request_fingerprint, operation_type, list_id, list_name, outcome)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, outcome)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """.trimIndent(),
                 ).use { statement ->
                     statement.setLong(1, revision)
@@ -166,7 +194,9 @@ internal class SqliteCanonicalStore(
                     statement.setInt(4, resolved.type.ordinal)
                     statement.setString(5, resolved.listId)
                     statement.setString(6, resolved.name)
-                    statement.setInt(7, resolved.outcome.number)
+                    statement.setString(7, resolved.itemId)
+                    statement.setString(8, resolved.itemText)
+                    statement.setInt(9, resolved.outcome.number)
                     statement.executeUpdate()
                 }
                 connection.prepareStatement(
@@ -197,7 +227,7 @@ internal class SqliteCanonicalStore(
     private fun existing(operation: ClientOperation): JournalEntry? =
         connection.prepareStatement(
             """
-            SELECT revision, operation_id, request_fingerprint, operation_type, list_id, list_name, outcome
+            SELECT revision, operation_id, request_fingerprint, operation_type, list_id, list_name, item_id, item_text, outcome
             FROM operation_journal WHERE operation_id = ?
             """.trimIndent(),
         ).use { statement ->
@@ -256,6 +286,53 @@ internal class SqliteCanonicalStore(
                 )
             }
 
+            ClientOperation.OperationCase.CREATE_ITEM -> {
+                validateUuidV4(operation.createItem.listId, "list ID")
+                validateUuidV4(operation.createItem.itemId, "item ID")
+                val listId = operation.createItem.listId
+                val itemId = operation.createItem.itemId
+                when {
+                    isTombstoned(listId) || !listExists(listId) || isItemTombstoned(itemId) || itemExists(itemId) ->
+                        ResolvedOperation(OperationOutcome.OPERATION_OUTCOME_IGNORED, Type.CREATE_ITEM, listId, "", itemId, operation.createItem.text)
+                    else -> resolveText(operation.createItem.text).let { text ->
+                        ResolvedOperation(text.outcome, Type.CREATE_ITEM, listId, "", itemId, text.value)
+                    }
+                }
+            }
+
+            ClientOperation.OperationCase.EDIT_ITEM_TEXT -> {
+                validateUuidV4(operation.editItemText.listId, "list ID")
+                validateUuidV4(operation.editItemText.itemId, "item ID")
+                val listId = operation.editItemText.listId
+                val itemId = operation.editItemText.itemId
+                when {
+                    isTombstoned(listId) || !listExists(listId) || isItemTombstoned(itemId) || !itemExists(itemId, listId) ->
+                        ResolvedOperation(OperationOutcome.OPERATION_OUTCOME_IGNORED, Type.EDIT_ITEM_TEXT, listId, "", itemId, operation.editItemText.text)
+                    else -> resolveText(operation.editItemText.text).let { text ->
+                        ResolvedOperation(text.outcome, Type.EDIT_ITEM_TEXT, listId, "", itemId, text.value)
+                    }
+                }
+            }
+
+            ClientOperation.OperationCase.DELETE_ITEM -> {
+                validateUuidV4(operation.deleteItem.listId, "list ID")
+                validateUuidV4(operation.deleteItem.itemId, "item ID")
+                val listId = operation.deleteItem.listId
+                val itemId = operation.deleteItem.itemId
+                ResolvedOperation(
+                    if (isTombstoned(listId) || !listExists(listId) || isItemTombstoned(itemId) || !itemExists(itemId, listId)) {
+                        OperationOutcome.OPERATION_OUTCOME_IGNORED
+                    } else {
+                        OperationOutcome.OPERATION_OUTCOME_APPLIED
+                    },
+                    Type.DELETE_ITEM,
+                    listId,
+                    "",
+                    itemId,
+                    "",
+                )
+            }
+
             ClientOperation.OperationCase.OPERATION_NOT_SET ->
                 throw IllegalArgumentException("operation is required")
         }
@@ -273,6 +350,15 @@ internal class SqliteCanonicalStore(
             suffix += 1
         }
         return ResolvedName(OperationOutcome.OPERATION_OUTCOME_APPLIED, candidate)
+    }
+
+    private fun resolveText(value: String): ResolvedName {
+        val normalized = Normalizer.normalize(value.trim(), Normalizer.Form.NFC)
+        return if (normalized.isEmpty() || normalized.codePointCount(0, normalized.length) > MAXIMUM_ITEM_TEXT_CODE_POINTS) {
+            ResolvedName(OperationOutcome.OPERATION_OUTCOME_REJECTED, normalized)
+        } else {
+            ResolvedName(OperationOutcome.OPERATION_OUTCOME_APPLIED, normalized)
+        }
     }
 
     private fun apply(operation: ResolvedOperation, revision: Long) {
@@ -309,6 +395,59 @@ internal class SqliteCanonicalStore(
                     statement.executeUpdate()
                 }
             }
+
+            Type.CREATE_ITEM -> connection.prepareStatement(
+                """
+                INSERT INTO list_items (id, list_id, text, position, marked)
+                VALUES (?, ?, ?, COALESCE((SELECT MAX(position) + 1 FROM list_items WHERE list_id = ?), 0), 0)
+                """.trimIndent(),
+            ).use { statement ->
+                statement.setString(1, operation.itemId)
+                statement.setString(2, operation.listId)
+                statement.setString(3, operation.itemText)
+                statement.setString(4, operation.listId)
+                statement.executeUpdate()
+            }
+
+            Type.EDIT_ITEM_TEXT -> connection.prepareStatement(
+                "UPDATE list_items SET text = ? WHERE id = ? AND list_id = ?",
+            ).use { statement ->
+                statement.setString(1, operation.itemText)
+                statement.setString(2, operation.itemId)
+                statement.setString(3, operation.listId)
+                statement.executeUpdate()
+            }
+
+            Type.DELETE_ITEM -> {
+                val position = connection.prepareStatement(
+                    "SELECT position FROM list_items WHERE id = ? AND list_id = ?",
+                ).use { statement ->
+                    statement.setString(1, operation.itemId)
+                    statement.setString(2, operation.listId)
+                    statement.executeQuery().use { result ->
+                        check(result.next())
+                        result.getInt("position")
+                    }
+                }
+                connection.prepareStatement("DELETE FROM list_items WHERE id = ?").use { statement ->
+                    statement.setString(1, operation.itemId)
+                    statement.executeUpdate()
+                }
+                connection.prepareStatement(
+                    "UPDATE list_items SET position = position - 1 WHERE list_id = ? AND position > ?",
+                ).use { statement ->
+                    statement.setString(1, operation.listId)
+                    statement.setInt(2, position)
+                    statement.executeUpdate()
+                }
+                connection.prepareStatement(
+                    "INSERT INTO item_tombstones (item_id, deleted_revision) VALUES (?, ?)",
+                ).use { statement ->
+                    statement.setString(1, operation.itemId)
+                    statement.setLong(2, revision)
+                    statement.executeUpdate()
+                }
+            }
         }
     }
 
@@ -323,8 +462,39 @@ internal class SqliteCanonicalStore(
         }
 
     private fun listExists(id: String): Boolean = exists("SELECT 1 FROM shared_lists WHERE id = ?", id)
-
     private fun isTombstoned(id: String): Boolean = exists("SELECT 1 FROM list_tombstones WHERE list_id = ?", id)
+    private fun isItemTombstoned(id: String): Boolean = exists("SELECT 1 FROM item_tombstones WHERE item_id = ?", id)
+    private fun itemExists(id: String, listId: String? = null): Boolean =
+        if (listId == null) {
+            exists("SELECT 1 FROM list_items WHERE id = ?", id)
+        } else {
+            connection.prepareStatement("SELECT 1 FROM list_items WHERE id = ? AND list_id = ?").use { statement ->
+                statement.setString(1, id)
+                statement.setString(2, listId)
+                statement.executeQuery().use { it.next() }
+            }
+        }
+
+    private fun items(listId: String): List<ListItem> =
+        connection.prepareStatement(
+            "SELECT id, text, position, marked FROM list_items WHERE list_id = ? ORDER BY position",
+        ).use { statement ->
+            statement.setString(1, listId)
+            statement.executeQuery().use { result ->
+                buildList {
+                    while (result.next()) {
+                        add(
+                            ListItem.newBuilder()
+                                .setId(result.getString("id"))
+                                .setMarked(result.getBoolean("marked"))
+                                .setPosition(result.getInt("position"))
+                                .setText(result.getString("text"))
+                                .build(),
+                        )
+                    }
+                }
+            }
+        }
 
     private fun nameExists(name: String, excludedListId: String?): Boolean =
         connection.prepareStatement(
@@ -354,6 +524,15 @@ internal class SqliteCanonicalStore(
                         .setListId(getString("list_id")).setName(getString("list_name")),
                 )
                 Type.DELETE -> setDeleteList(DeleteList.newBuilder().setListId(getString("list_id")))
+                Type.CREATE_ITEM -> setCreateItem(
+                    CreateItem.newBuilder().setListId(getString("list_id")).setItemId(getString("item_id")).setText(getString("item_text")),
+                )
+                Type.EDIT_ITEM_TEXT -> setEditItemText(
+                    EditItemText.newBuilder().setListId(getString("list_id")).setItemId(getString("item_id")).setText(getString("item_text")),
+                )
+                Type.DELETE_ITEM -> setDeleteItem(
+                    DeleteItem.newBuilder().setListId(getString("list_id")).setItemId(getString("item_id")),
+                )
             }
         }.build()
         return JournalEntry.newBuilder()
@@ -366,7 +545,10 @@ internal class SqliteCanonicalStore(
     private enum class Type {
         CREATE,
         RENAME,
-        DELETE;
+        DELETE,
+        CREATE_ITEM,
+        EDIT_ITEM_TEXT,
+        DELETE_ITEM;
 
         companion object {
             fun fromNumber(number: Int): Type = entries[number]
@@ -378,6 +560,8 @@ internal class SqliteCanonicalStore(
         val type: Type,
         val listId: String,
         val name: String,
+        val itemId: String = "",
+        val itemText: String = "",
     ) {
         fun toEntry(revision: Long, operationId: String): JournalEntry {
             val operation = ClientOperation.newBuilder().setOperationId(operationId).apply {
@@ -385,6 +569,15 @@ internal class SqliteCanonicalStore(
                     Type.CREATE -> setCreateList(CreateList.newBuilder().setListId(listId).setName(name))
                     Type.RENAME -> setRenameList(RenameList.newBuilder().setListId(listId).setName(name))
                     Type.DELETE -> setDeleteList(DeleteList.newBuilder().setListId(listId))
+                    Type.CREATE_ITEM -> setCreateItem(
+                        CreateItem.newBuilder().setListId(listId).setItemId(itemId).setText(itemText),
+                    )
+                    Type.EDIT_ITEM_TEXT -> setEditItemText(
+                        EditItemText.newBuilder().setListId(listId).setItemId(itemId).setText(itemText),
+                    )
+                    Type.DELETE_ITEM -> setDeleteItem(
+                        DeleteItem.newBuilder().setListId(listId).setItemId(itemId),
+                    )
                 }
             }.build()
             return JournalEntry.newBuilder().setRevision(revision).setOperation(operation).setOutcome(outcome).build()
@@ -398,6 +591,7 @@ internal class SqliteCanonicalStore(
 
     private companion object {
         const val MAXIMUM_NAME_CODE_POINTS = 100
+        const val MAXIMUM_ITEM_TEXT_CODE_POINTS = 500
 
         fun fold(value: String): String =
             value.uppercase(Locale.ROOT)
@@ -429,6 +623,12 @@ internal class SqliteCanonicalStore(
             ClientOperation.OperationCase.RENAME_LIST ->
                 "rename\u0000${operation.renameList.listId}\u0000${operation.renameList.name}"
             ClientOperation.OperationCase.DELETE_LIST -> "delete\u0000${operation.deleteList.listId}"
+            ClientOperation.OperationCase.CREATE_ITEM ->
+                "create-item\u0000${operation.createItem.listId}\u0000${operation.createItem.itemId}\u0000${operation.createItem.text}"
+            ClientOperation.OperationCase.EDIT_ITEM_TEXT ->
+                "edit-item-text\u0000${operation.editItemText.listId}\u0000${operation.editItemText.itemId}\u0000${operation.editItemText.text}"
+            ClientOperation.OperationCase.DELETE_ITEM ->
+                "delete-item\u0000${operation.deleteItem.listId}\u0000${operation.deleteItem.itemId}"
             ClientOperation.OperationCase.OPERATION_NOT_SET -> "unset"
         }
 }

@@ -50,6 +50,14 @@ message SyncRequest {
 message SharedList {
   string id = 1;
   string name = 2;
+  repeated ListItem items = 3;
+}
+
+message ListItem {
+  string id = 1;
+  string text = 2;
+  int32 position = 3;
+  bool marked = 4;
 }
 
 message ListTombstone {
@@ -78,12 +86,32 @@ message DeleteList {
   string list_id = 1;
 }
 
+message CreateItem {
+  string list_id = 1;
+  string item_id = 2;
+  string text = 3;
+}
+
+message EditItemText {
+  string list_id = 1;
+  string item_id = 2;
+  string text = 3;
+}
+
+message DeleteItem {
+  string list_id = 1;
+  string item_id = 2;
+}
+
 message ClientOperation {
   string operation_id = 1;
   oneof operation {
     CreateList create_list = 2;
     RenameList rename_list = 3;
     DeleteList delete_list = 4;
+    CreateItem create_item = 5;
+    EditItemText edit_item_text = 6;
+    DeleteItem delete_item = 7;
   }
 }
 

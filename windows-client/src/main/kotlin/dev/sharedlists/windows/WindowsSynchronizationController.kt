@@ -4,12 +4,16 @@ import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
 import dev.sharedlists.client.CreateList
+import dev.sharedlists.client.CreateItem
+import dev.sharedlists.client.DeleteItem
 import dev.sharedlists.client.DeleteList
 import dev.sharedlists.client.DeviceSigner
+import dev.sharedlists.client.EditItemText
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.GrpcSharedListsClient
+import dev.sharedlists.client.ListItemId
 import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
 import dev.sharedlists.client.RenameList
@@ -250,10 +254,36 @@ class WindowsSynchronizationController(
         submit(name) { operationId -> CreateList(operationId, newListId(), name) }
     }
 
+    fun createItem(listName: String, text: String) {
+        val list = cachedState.lists.firstOrNull { it.name == listName } ?: return
+        if (list.items.any { it.text == text.trim() }) {
+            update(presentation.copy(statusMessage = "A matching item already exists; saving duplicate…"))
+        }
+        submit(text, ITEM_TEXT_LIMIT) { operationId -> CreateItem(operationId, newItemId(), list.id, text) }
+    }
+
     fun deleteList(name: String) {
         val list = cachedState.lists.firstOrNull { it.name == name } ?: return
         submit(null) { operationId -> DeleteList(operationId, list.id) }
     }
+
+    fun deleteItem(listName: String, itemId: ListItemId) {
+        val list = cachedState.lists.firstOrNull { it.name == listName } ?: return
+        if (list.items.none { it.id == itemId }) {
+            return
+        }
+        submit(null) { operationId -> DeleteItem(operationId, itemId, list.id) }
+    }
+
+    fun editItemText(listName: String, itemId: ListItemId, newText: String) {
+        val list = cachedState.lists.firstOrNull { it.name == listName } ?: return
+        if (list.items.none { it.id == itemId }) {
+            return
+        }
+        submit(newText, ITEM_TEXT_LIMIT) { operationId -> EditItemText(operationId, itemId, list.id, newText) }
+    }
+
+    fun items(listName: String) = cachedState.lists.firstOrNull { it.name == listName }?.items.orEmpty()
 
     fun observePresentation(observer: (WindowsClientPresentation) -> Unit) {
         stateChanged = observer
@@ -392,8 +422,8 @@ class WindowsSynchronizationController(
                 presentation.copy(
                     statusMessage = when (outcome.outcome) {
                         OperationOutcome.APPLIED -> "Saved"
-                        OperationOutcome.IGNORED -> "No change: the list was deleted."
-                        OperationOutcome.REJECTED -> "Not saved: invalid list name."
+                        OperationOutcome.IGNORED -> "No change: the list or item was deleted."
+                        OperationOutcome.REJECTED -> "Not saved: invalid list name or item text."
                     },
                 ),
             )
@@ -401,6 +431,8 @@ class WindowsSynchronizationController(
     }
 
     private fun newListId(): SharedListId = SharedListId.parse(UUID.randomUUID().toString())
+
+    private fun newItemId(): ListItemId = ListItemId.parse(UUID.randomUUID().toString())
 
     private fun newOperationId(): OperationId = OperationId.parse(UUID.randomUUID().toString())
 
@@ -430,14 +462,16 @@ class WindowsSynchronizationController(
 
     private fun submit(
         name: String?,
+        maximumLength: Int = LIST_NAME_LIMIT,
         command: (OperationId) -> EditCommand,
     ) {
         if (!presentation.editingEnabled) {
             update(presentation.copy(statusMessage = "Editing is available only while synchronized."))
             return
         }
-        if (name != null && !validName(name)) {
-            update(presentation.copy(statusMessage = "Enter a list name of at most 100 characters."))
+        if (name != null && !validText(name, maximumLength)) {
+            val itemOrList = if (maximumLength == ITEM_TEXT_LIMIT) "item text" else "list name"
+            update(presentation.copy(statusMessage = "Enter $itemOrList of at most $maximumLength characters."))
             return
         }
         val client = requireNotNull(liveClient) { "Live client is missing." }
@@ -460,9 +494,9 @@ class WindowsSynchronizationController(
         }
     }
 
-    private fun validName(name: String): Boolean {
-        val trimmed = name.trim()
-        return trimmed.isNotEmpty() && trimmed.codePointCount(0, trimmed.length) <= 100
+    private fun validText(text: String, maximumLength: Int): Boolean {
+        val trimmed = text.trim()
+        return trimmed.isNotEmpty() && trimmed.codePointCount(0, trimmed.length) <= maximumLength
     }
 
     @Synchronized
@@ -491,6 +525,8 @@ class WindowsSynchronizationController(
         !deviceKeyUnreadable && deviceEnrollment != null && deviceKeyFingerprint() == null
 
     companion object {
+        private const val ITEM_TEXT_LIMIT = 500
+        private const val LIST_NAME_LIMIT = 100
         private val FINGERPRINT = Regex("^[0-9A-F]{64}$")
     }
 }

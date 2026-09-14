@@ -3,8 +3,11 @@ package dev.sharedlists.client
 import dev.sharedlists.protocol.AppliedThrough
 import dev.sharedlists.protocol.ChallengeRequest
 import dev.sharedlists.protocol.ClientOperation
+import dev.sharedlists.protocol.CreateItem as ProtoCreateItem
 import dev.sharedlists.protocol.CreateList as ProtoCreateList
+import dev.sharedlists.protocol.DeleteItem as ProtoDeleteItem
 import dev.sharedlists.protocol.DeleteList as ProtoDeleteList
+import dev.sharedlists.protocol.EditItemText as ProtoEditItemText
 import dev.sharedlists.protocol.JournalEntry
 import dev.sharedlists.protocol.Live
 import dev.sharedlists.protocol.OpenSync
@@ -98,6 +101,13 @@ class FileClientStateStore(
                     (0 until properties.getProperty("list.count", "0").toInt()).map { index ->
                         SharedList(
                             id = SharedListId.parse(requireNotNull(properties.getProperty("list.$index.id"))),
+                            items = (0 until properties.getProperty("list.$index.item.count", "0").toInt()).map { itemIndex ->
+                                ListItem(
+                                    id = ListItemId.parse(requireNotNull(properties.getProperty("list.$index.item.$itemIndex.id"))),
+                                    marked = requireNotNull(properties.getProperty("list.$index.item.$itemIndex.marked")).toBoolean(),
+                                    text = requireNotNull(properties.getProperty("list.$index.item.$itemIndex.text")),
+                                )
+                            },
                             name = requireNotNull(properties.getProperty("list.$index.name")),
                         )
                     },
@@ -120,6 +130,12 @@ class FileClientStateStore(
                 properties.setProperty("list.count", canonicalState.lists.size.toString())
                 canonicalState.lists.forEachIndexed { index, list ->
                     properties.setProperty("list.$index.id", list.id.value)
+                    properties.setProperty("list.$index.item.count", list.items.size.toString())
+                    list.items.forEachIndexed { itemIndex, item ->
+                        properties.setProperty("list.$index.item.$itemIndex.id", item.id.value)
+                        properties.setProperty("list.$index.item.$itemIndex.marked", item.marked.toString())
+                        properties.setProperty("list.$index.item.$itemIndex.text", item.text)
+                    }
                     properties.setProperty("list.$index.name", list.name)
                 }
                 properties.store(stream, null)
@@ -265,7 +281,17 @@ class GrpcSharedListsClient(
                 response.hasSnapshot() -> acceptSnapshot(
                     response.snapshot.generation,
                     response.snapshot.revision,
-                    CanonicalState(response.snapshot.listsList.map { SharedList(SharedListId.parse(it.id), it.name) }),
+                    CanonicalState(
+                        response.snapshot.listsList.map { list ->
+                            SharedList(
+                                id = SharedListId.parse(list.id),
+                                items = list.itemsList.sortedBy { it.position }.map { item ->
+                                    ListItem(ListItemId.parse(item.id), item.marked, item.text)
+                                },
+                                name = list.name,
+                            )
+                        },
+                    ),
                 )
 
                 response.hasJournalBatch() -> {
@@ -294,16 +320,58 @@ class GrpcSharedListsClient(
 
         private suspend fun apply(entry: JournalEntry) {
             val operation = entry.operation
+            if (entry.revision <= cursor.lastAppliedRevision) {
+                if (unconfirmedOutcome != null && operation.operationId == unconfirmedOperationId) {
+                    unconfirmedOutcome?.complete(DurableOperationOutcome(OperationId.parse(operation.operationId), entry.outcome.toClientOutcome()))
+                }
+                return
+            }
+            check(entry.revision == cursor.lastAppliedRevision + 1) {
+                "Server journal revisions must be contiguous."
+            }
             val lists = canonicalState.lists.toMutableList()
             if (entry.outcome == ProtoOperationOutcome.OPERATION_OUTCOME_APPLIED) {
                 when (operation.operationCase) {
                     ClientOperation.OperationCase.CREATE_LIST -> lists += SharedList(
-                        SharedListId.parse(operation.createList.listId),
-                        operation.createList.name,
+                        id = SharedListId.parse(operation.createList.listId),
+                        name = operation.createList.name,
                     )
+                    ClientOperation.OperationCase.CREATE_ITEM -> {
+                        val index = lists.indexOfFirst { it.id.value == operation.createItem.listId }
+                        if (index >= 0) {
+                            lists[index] = lists[index].copy(
+                                items = lists[index].items + ListItem(
+                                    id = ListItemId.parse(operation.createItem.itemId),
+                                    text = operation.createItem.text,
+                                ),
+                            )
+                        }
+                    }
+                    ClientOperation.OperationCase.DELETE_ITEM -> {
+                        val index = lists.indexOfFirst { it.id.value == operation.deleteItem.listId }
+                        if (index >= 0) {
+                            lists[index] = lists[index].copy(
+                                items = lists[index].items.filterNot { it.id.value == operation.deleteItem.itemId },
+                            )
+                        }
+                    }
                     ClientOperation.OperationCase.RENAME_LIST -> {
                         val index = lists.indexOfFirst { it.id.value == operation.renameList.listId }
                         if (index >= 0) lists[index] = lists[index].copy(name = operation.renameList.name)
+                    }
+                    ClientOperation.OperationCase.EDIT_ITEM_TEXT -> {
+                        val index = lists.indexOfFirst { it.id.value == operation.editItemText.listId }
+                        if (index >= 0) {
+                            lists[index] = lists[index].copy(
+                                items = lists[index].items.map { item ->
+                                    if (item.id.value == operation.editItemText.itemId) {
+                                        item.copy(text = operation.editItemText.text)
+                                    } else {
+                                        item
+                                    }
+                                },
+                            )
+                        }
                     }
                     ClientOperation.OperationCase.DELETE_LIST -> lists.removeAll { it.id.value == operation.deleteList.listId }
                     ClientOperation.OperationCase.OPERATION_NOT_SET -> error("Journal entry has no operation.")
@@ -336,7 +404,24 @@ class GrpcSharedListsClient(
             ClientOperation.newBuilder().setOperationId(operationId.value).apply {
                 when (this@toProto) {
                     is CreateList -> setCreateList(ProtoCreateList.newBuilder().setListId(listId.value).setName(name))
+                    is CreateItem -> setCreateItem(
+                        ProtoCreateItem.newBuilder()
+                            .setItemId(itemId.value)
+                            .setListId(listId.value)
+                            .setText(text),
+                    )
+                    is DeleteItem -> setDeleteItem(
+                        ProtoDeleteItem.newBuilder()
+                            .setItemId(itemId.value)
+                            .setListId(listId.value),
+                    )
                     is DeleteList -> setDeleteList(ProtoDeleteList.newBuilder().setListId(listId.value))
+                    is EditItemText -> setEditItemText(
+                        ProtoEditItemText.newBuilder()
+                            .setItemId(itemId.value)
+                            .setListId(listId.value)
+                            .setText(text),
+                    )
                     is RenameList -> setRenameList(ProtoRenameList.newBuilder().setListId(listId.value).setName(name))
                 }
             }.build()

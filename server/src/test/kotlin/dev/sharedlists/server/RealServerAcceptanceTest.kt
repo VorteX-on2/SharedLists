@@ -32,6 +32,7 @@ import java.security.KeyPairGenerator
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.time.Duration
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.inputStream
 import kotlin.io.path.writeText
@@ -242,6 +243,66 @@ class RealServerAcceptanceTest {
         }
     }
 
+    @Test
+    fun `independent live clients converge concurrent field lifecycle name and move races across restart`() {
+        TemporaryServerInstallation().use { fixture ->
+            fixture.start()
+            val first = fixture.client(0)
+            val second = fixture.client(1)
+            val listId = sharedListId()
+            val firstItemId = listItemId()
+            val secondItemId = listItemId()
+            val thirdItemId = listItemId()
+
+            first.synchronizeBlocking()
+            second.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(CreateList(operationId(), listId, "Groceries")).lastOperationOutcome?.outcome)
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(CreateItem(firstItemId, listId, operationId(), "Milk")).lastOperationOutcome?.outcome)
+            second.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, second.submitBlocking(CreateItem(secondItemId, listId, operationId(), "Bread")).lastOperationOutcome?.outcome)
+            first.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(CreateItem(thirdItemId, listId, operationId(), "Eggs")).lastOperationOutcome?.outcome)
+
+            second.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, second.submitBlocking(EditItemText(firstItemId, listId, operationId(), "Oat milk")).lastOperationOutcome?.outcome)
+            first.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(SetMarked(firstItemId, listId, operationId(), true)).lastOperationOutcome?.outcome)
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(EditItemText(firstItemId, listId, operationId(), "Almond milk")).lastOperationOutcome?.outcome)
+            second.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, second.submitBlocking(EditItemText(firstItemId, listId, operationId(), "Soy milk")).lastOperationOutcome?.outcome)
+            first.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(MoveItem(thirdItemId, listId, operationId(), firstItemId, secondItemId)).lastOperationOutcome?.outcome)
+            second.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, second.submitBlocking(MoveItem(secondItemId, listId, operationId(), thirdItemId, null)).lastOperationOutcome?.outcome)
+
+            val collidingListId = sharedListId()
+            first.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(CreateList(operationId(), sharedListId(), "Errands")).lastOperationOutcome?.outcome)
+            second.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, second.submitBlocking(CreateList(operationId(), collidingListId, " errands ")).lastOperationOutcome?.outcome)
+            first.synchronizeBlocking()
+            assertEquals(OperationOutcome.APPLIED, first.submitBlocking(DeleteItem(firstItemId, listId, operationId())).lastOperationOutcome?.outcome)
+            second.synchronizeBlocking()
+            assertEquals(OperationOutcome.IGNORED, second.submitBlocking(EditItemText(firstItemId, listId, operationId(), "Resurrected")).lastOperationOutcome?.outcome)
+            first.synchronizeBlocking()
+            assertEquals(OperationOutcome.IGNORED, first.submitBlocking(SetMarked(firstItemId, listId, operationId(), false)).lastOperationOutcome?.outcome)
+            second.synchronizeBlocking()
+            assertEquals(OperationOutcome.IGNORED, second.submitBlocking(MoveItem(firstItemId, listId, operationId(), null, secondItemId)).lastOperationOutcome?.outcome)
+            assertEquals(OperationOutcome.APPLIED, second.submitBlocking(DeleteList(operationId(), listId)).lastOperationOutcome?.outcome)
+            first.synchronizeBlocking()
+            assertEquals(OperationOutcome.IGNORED, first.submitBlocking(CreateItem(listItemId(), listId, operationId(), "Stale")).lastOperationOutcome?.outcome)
+
+            fixture.restart()
+            val afterRestartFirst = fixture.client(0).synchronizeBlocking()
+            val afterRestartSecond = fixture.client(1).synchronizeBlocking()
+
+            assertEquals(afterRestartFirst.canonicalState, afterRestartSecond.canonicalState)
+            assertEquals(afterRestartFirst.cursor, afterRestartSecond.cursor)
+            assertEquals(listOf("Errands", "errands (2)"), afterRestartFirst.canonicalState.lists.map { it.name })
+            assertTrue(afterRestartFirst.cursor?.lastAppliedRevision ?: 0 > 0)
+        }
+    }
+
     private fun firstItem(): CreateItem =
         CreateItem(
             operationId = OperationId.parse("a1111111-1111-4111-8111-111111111111"),
@@ -257,6 +318,12 @@ class RealServerAcceptanceTest {
             listId = SharedListId.parse("61111111-1111-4111-8111-111111111111"),
             text = "x".repeat(501),
         )
+
+    private fun listItemId(): ListItemId = ListItemId.parse(UUID.randomUUID().toString())
+
+    private fun operationId(): OperationId = OperationId.parse(UUID.randomUUID().toString())
+
+    private fun sharedListId(): SharedListId = SharedListId.parse(UUID.randomUUID().toString())
 
     private fun GrpcSharedListsClient.synchronizeBlocking(): ClientState.Ready =
         runBlocking {

@@ -8,6 +8,7 @@ import com.nimbusds.jwt.SignedJWT
 import dev.sharedlists.protocol.AuthenticationChallenge
 import io.grpc.Context
 import io.grpc.Contexts
+import io.grpc.ForwardingServerCallListener
 import io.grpc.Metadata
 import io.grpc.ServerCall
 import io.grpc.ServerCallHandler
@@ -136,6 +137,7 @@ internal class ChallengeAuthenticator(
 
 internal class AuthenticationInterceptor(
     private val authenticator: ChallengeAuthenticator,
+    private val streams: ActiveStreamRegistry,
 ) : ServerInterceptor {
     override fun <RequestT : Any, ResponseT : Any> interceptCall(
         call: ServerCall<RequestT, ResponseT>,
@@ -151,12 +153,24 @@ internal class AuthenticationInterceptor(
             ?: return close(call, AuthFailure.INVALID_AUTHENTICATION)
         return try {
             val fingerprint = authenticator.authenticate(token)
-            Contexts.interceptCall(
+            streams.register(fingerprint, call)
+            val listener = Contexts.interceptCall(
                 Context.current().withValue(AuthContext.keyFingerprint, fingerprint),
                 call,
                 headers,
                 next,
             )
+            object : ForwardingServerCallListener.SimpleForwardingServerCallListener<RequestT>(listener) {
+                override fun onCancel() {
+                    streams.unregister(fingerprint, call)
+                    super.onCancel()
+                }
+
+                override fun onComplete() {
+                    streams.unregister(fingerprint, call)
+                    super.onComplete()
+                }
+            }
         } catch (exception: AuthenticationException) {
             close(call, exception.failure)
         }
@@ -174,6 +188,24 @@ internal class AuthenticationInterceptor(
         const val BEARER_PREFIX = "Bearer "
         val AUTHORIZATION: Metadata.Key<String> =
             Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER)
+    }
+}
+
+internal class ActiveStreamRegistry {
+    private val calls = mutableMapOf<String, ServerCall<*, *>>()
+
+    fun <RequestT : Any, ResponseT : Any> register(keyFingerprint: String, call: ServerCall<RequestT, ResponseT>) {
+        synchronized(calls) {
+            calls.put(keyFingerprint, call)?.close(Status.ABORTED.withDescription("session superseded"), Metadata())
+        }
+    }
+
+    fun <RequestT : Any, ResponseT : Any> unregister(keyFingerprint: String, call: ServerCall<RequestT, ResponseT>) {
+        synchronized(calls) {
+            if (calls[keyFingerprint] === call) {
+                calls.remove(keyFingerprint)
+            }
+        }
     }
 }
 

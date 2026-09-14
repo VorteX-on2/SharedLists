@@ -16,6 +16,7 @@ fun main(args: Array<String>) {
         configuration.serviceUri,
         AuthorizedDeviceKeys.load(configuration.authorizedDevicesDirectory),
     )
+    val streams = ActiveStreamRegistry()
     SqliteCanonicalStore(configuration.databaseFile).use { store ->
         val server = NettyServerBuilder
             .forAddress(InetSocketAddress(InetAddress.getByName(configuration.bindAddress), configuration.port))
@@ -23,7 +24,7 @@ fun main(args: Array<String>) {
             .addService(
                 ServerInterceptors.intercept(
                     SharedListsService(authenticator, store),
-                    AuthenticationInterceptor(authenticator),
+                    AuthenticationInterceptor(authenticator, streams),
                     RequestHeadersInterceptor(),
                 ),
             ).build()

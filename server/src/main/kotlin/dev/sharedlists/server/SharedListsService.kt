@@ -30,14 +30,18 @@ internal class SharedListsService(
         }
 
     override fun sync(requests: Flow<SyncRequest>): Flow<SyncResponse> = channelFlow {
+        val events = Channel<Event>(MAXIMUM_QUEUED_EVENTS)
         var phase = Phase.OPENING
         var generation = ""
         var lastAcknowledgedRevision = -1L
         var synchronizedRevision = -1L
         var lastDeliveredRevision = -1L
-        val events = Channel<Event>(Channel.UNLIMITED)
         val journalJob = launch(start = CoroutineStart.UNDISPATCHED) {
-            store.journalEntries.collect { events.send(Event.Journal(it)) }
+            store.journalEntries.collect { entry ->
+                if (events.trySend(Event.Journal(entry)).isFailure) {
+                    events.trySend(Event.SlowConsumer)
+                }
+            }
         }
         val requestJob = launch {
             try {
@@ -125,6 +129,9 @@ internal class SharedListsService(
                     }
 
                     Event.Closed -> break
+                    Event.SlowConsumer -> throw Status.RESOURCE_EXHAUSTED
+                        .withDescription("slow consumer overflow")
+                        .asRuntimeException()
                 }
             }
         } finally {
@@ -191,6 +198,8 @@ internal class SharedListsService(
     private sealed interface Event {
         data object Closed : Event
 
+        data object SlowConsumer : Event
+
         data class Journal(val entry: JournalEntry) : Event
 
         data class Request(val request: SyncRequest) : Event
@@ -208,5 +217,9 @@ internal class SharedListsService(
         OPENING,
         SYNCING,
         LIVE,
+    }
+
+    private companion object {
+        const val MAXIMUM_QUEUED_EVENTS = 128
     }
 }

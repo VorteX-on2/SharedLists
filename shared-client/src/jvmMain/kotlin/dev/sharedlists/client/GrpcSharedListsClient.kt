@@ -406,10 +406,10 @@ class GrpcSharedListsClient(
                                 val predecessor = operation.moveItem.predecessorItemId
                                 val successor = operation.moveItem.successorItemId
                                 val destination = when {
-                                    predecessor.isNotEmpty() -> remaining.indexOfFirst { it.id.value == predecessor }.takeIf { it >= 0 }?.plus(1)
+                                    successor.isNotEmpty() -> remaining.indexOfFirst { it.id.value == successor }.takeIf { it >= 0 }
                                     else -> null
                                 } ?: when {
-                                    successor.isNotEmpty() -> remaining.indexOfFirst { it.id.value == successor }.takeIf { it >= 0 }
+                                    predecessor.isNotEmpty() -> remaining.indexOfFirst { it.id.value == predecessor }.takeIf { it >= 0 }?.plus(1)
                                     else -> null
                                 } ?: remaining.size
                                 remaining.add(destination, item)

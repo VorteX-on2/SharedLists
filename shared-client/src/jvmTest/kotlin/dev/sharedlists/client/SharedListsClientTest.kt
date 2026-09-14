@@ -11,11 +11,11 @@ class SharedListsClientTest {
             connectivity = ConnectivityState.LIVE,
             canonicalState = CanonicalState(),
             cursor = SynchronizationCursor("test-generation", 0),
-            editingEnabled = true,
         )
         val client: SharedListsClient = StaticSharedListsClient(expected)
 
         assertEquals(expected, kotlinx.coroutines.runBlocking { client.synchronize() })
+        assertEquals(true, expected.editingEnabled)
     }
 
     private class StaticSharedListsClient(

@@ -177,6 +177,10 @@ interface ForegroundSharedListsClient {
     fun cancelForegroundSynchronization()
 }
 
+interface CachedSharedListsClient {
+    fun cachedCanonicalState(): CanonicalState
+}
+
 interface ObservableSharedListsClient {
     fun observeState(observer: (ClientState.Ready) -> Unit)
 }

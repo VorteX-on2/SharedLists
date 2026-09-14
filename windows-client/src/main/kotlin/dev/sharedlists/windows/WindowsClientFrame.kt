@@ -164,6 +164,10 @@ class WindowsClientFrame(
                     controller.onBackground()
                 }
 
+                override fun windowOpened(event: WindowEvent) {
+                    controller.onForeground()
+                }
+
                 override fun windowDeiconified(event: WindowEvent) {
                     controller.onForeground()
                 }

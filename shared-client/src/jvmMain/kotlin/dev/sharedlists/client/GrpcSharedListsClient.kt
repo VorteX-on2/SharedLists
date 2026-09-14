@@ -42,8 +42,8 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import java.time.Instant
-import java.util.concurrent.TimeUnit
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import java.util.Properties
 import javax.net.ssl.ManagerFactoryParameters
 import javax.net.ssl.TrustManager
@@ -163,7 +163,7 @@ class GrpcSharedListsClient(
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
-) : ForegroundSharedListsClient, ObservableSharedListsClient, SharedListsClient {
+) : CachedSharedListsClient, ForegroundSharedListsClient, ObservableSharedListsClient, SharedListsClient {
     private var activeSession: ActiveSession? = null
     private var cachedState = stateStore.loadCanonicalState()
     private var stateObserver: (ClientState.Ready) -> Unit = {}
@@ -206,6 +206,14 @@ class GrpcSharedListsClient(
         } catch (exception: Exception) {
             channel.shutdownNow()
             activeSession = null
+            if (exception is ServerFaultException) {
+                return ClientState.Ready(
+                    enrollment = EnrollmentState.ENROLLED,
+                    connectivity = ConnectivityState.FATAL,
+                    canonicalState = cachedState,
+                    cursor = stateStore.loadCursor(),
+                )
+            }
             throw exception
         }
     }
@@ -219,6 +227,8 @@ class GrpcSharedListsClient(
         stateObserver = observer
         activeSession?.let { observer(it.ready()) }
     }
+
+    override fun cachedCanonicalState(): CanonicalState = cachedState
 
     override fun cancelForegroundSynchronization() {
         activeSession?.cancel()

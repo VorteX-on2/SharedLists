@@ -1,6 +1,7 @@
 package dev.sharedlists.windows
 
 import dev.sharedlists.client.CanonicalState
+import dev.sharedlists.client.CachedSharedListsClient
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
 import dev.sharedlists.client.CreateItem
@@ -320,6 +321,8 @@ class WindowsSynchronizationController(
         }
         cancelForegroundSynchronization()
         val attempt = nextConnectionAttempt()
+        val client = clientFactory.create(configuration)
+        cachedState = (client as? CachedSharedListsClient)?.cachedCanonicalState() ?: cachedState
         update(
             presentation.copy(
                 connectionActive = true,
@@ -331,7 +334,6 @@ class WindowsSynchronizationController(
                 statusMessage = "Connecting…",
             ),
         )
-        val client = clientFactory.create(configuration)
         liveClient = client
         synchronizationRunner.run {
             suspend {

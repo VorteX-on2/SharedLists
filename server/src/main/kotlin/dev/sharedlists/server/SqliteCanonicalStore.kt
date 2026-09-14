@@ -31,6 +31,25 @@ internal class SqliteCanonicalStore(
     private val connection: Connection
     private val lock = Any()
     private val _journalEntries = MutableSharedFlow<JournalEntry>(extraBufferCapacity = 256)
+    private val expectedColumnSets = mapOf(
+        "synchronization_metadata" to setOf("singleton", "generation", "head_revision"),
+        "list_items" to setOf("id", "list_id", "text", "position", "marked"),
+        "item_tombstones" to setOf("item_id", "deleted_revision"),
+        "shared_lists" to setOf("id", "display_name", "normalized_name"),
+        "list_tombstones" to setOf("list_id", "deleted_revision"),
+        "operation_journal" to setOf(
+            "revision", "operation_id", "request_fingerprint", "operation_type", "list_id", "list_name",
+            "item_id", "item_text", "marked_value", "predecessor_item_id", "successor_item_id", "outcome",
+        ),
+    )
+    private val expectedDefinitions = mapOf(
+        "synchronization_metadata" to setOf("primary key", "check (singleton = 1)"),
+        "list_items" to setOf("primary key", "references shared_lists(id)", "unique (list_id, position)"),
+        "item_tombstones" to setOf("primary key"),
+        "shared_lists" to setOf("primary key", "unique"),
+        "list_tombstones" to setOf("primary key"),
+        "operation_journal" to setOf("primary key", "operation_id text not null unique"),
+    )
 
     val journalEntries: SharedFlow<JournalEntry> = _journalEntries
 
@@ -261,16 +280,25 @@ internal class SqliteCanonicalStore(
             }
         }
         return actualTables == expectedTables &&
-            columns(statement, "operation_journal") == setOf(
-                "revision", "operation_id", "request_fingerprint", "operation_type", "list_id", "list_name",
-                "item_id", "item_text", "marked_value", "predecessor_item_id", "successor_item_id", "outcome",
-            )
+            expectedColumnSets.all { (table, expectedColumns) -> columns(statement, table) == expectedColumns } &&
+            expectedDefinitions.all { (table, fragments) ->
+                tableDefinition(statement, table).let { definition -> fragments.all(definition::contains) }
+            }
     }
 
     private fun columns(statement: Statement, table: String): Set<String> =
         statement.executeQuery("PRAGMA table_info($table)").use { result ->
             buildSet {
                 while (result.next()) add(result.getString("name"))
+            }
+        }
+
+    private fun tableDefinition(statement: Statement, table: String): String =
+        statement.connection.prepareStatement("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").use { query ->
+            query.setString(1, table)
+            query.executeQuery().use { result ->
+                require(result.next()) { "SQLite schema is missing $table." }
+                result.getString(1).lowercase().replace(Regex("""\s+"""), " ")
             }
         }
 

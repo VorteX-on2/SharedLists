@@ -11,6 +11,7 @@ import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.SecureRandom
 import java.security.Security
+import java.security.Signature
 import java.security.cert.X509Certificate
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -119,10 +120,10 @@ internal object ServerIdentityManager {
     private fun privateKeyMatchesCertificate(file: Path, certificate: X509Certificate): Boolean {
         val privateKey = readPrivateKey(file)
         val challenge = ByteArray(32).also(SecureRandom()::nextBytes)
-        val signature = java.security.Signature.getInstance("SHA256withECDSA")
+        val signature = Signature.getInstance("SHA256withECDSA")
         signature.initSign(privateKey)
         signature.update(challenge)
-        val verifier = java.security.Signature.getInstance("SHA256withECDSA")
+        val verifier = Signature.getInstance("SHA256withECDSA")
         verifier.initVerify(certificate.publicKey)
         verifier.update(challenge)
         return verifier.verify(signature.sign())

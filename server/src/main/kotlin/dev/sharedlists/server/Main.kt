@@ -4,12 +4,16 @@ import dev.sharedlists.protocol.ServerFaultReason
 import io.grpc.Server
 import io.grpc.ServerInterceptors
 import io.grpc.netty.NettyServerBuilder
+import kotlin.system.exitProcess
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.system.exitProcess
+
+private const val MAXIMUM_MESSAGE_BYTES = 1024 * 1024
+private const val SHUTDOWN_TIMEOUT_SECONDS = 10L
 
 fun main(args: Array<String>) {
     val exitCode = try {
@@ -35,6 +39,7 @@ private fun run(args: Array<String>) {
     SqliteCanonicalStore(configuration.databaseFile).use { store ->
         var fatalFault: ServerFaultReason? = null
         val serverReference = AtomicReference<Server>()
+        val shutdownTimedOut = AtomicBoolean(false)
         val server = NettyServerBuilder
             .forAddress(InetSocketAddress(InetAddress.getByName(configuration.bindAddress), configuration.port))
             .useTransportSecurity(identity.certificateFile.toFile(), identity.privateKeyFile.toFile())
@@ -63,14 +68,13 @@ private fun run(args: Array<String>) {
                 server.shutdown()
                 if (!server.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                     System.err.println("ERROR: graceful shutdown exceeded $SHUTDOWN_TIMEOUT_SECONDS seconds")
+                    shutdownTimedOut.set(true)
                     server.shutdownNow()
                 }
             },
         )
         server.awaitTermination()
+        check(!shutdownTimedOut.get()) { "Server did not shut down gracefully." }
         check(fatalFault == null) { "Server stopped after fatal fault: $fatalFault" }
     }
 }
-
-private const val MAXIMUM_MESSAGE_BYTES = 1024 * 1024
-private const val SHUTDOWN_TIMEOUT_SECONDS = 10L

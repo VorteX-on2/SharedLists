@@ -54,10 +54,6 @@ internal data class ServerConfiguration(
             )
         }
 
-        private fun resolve(baseDirectory: Path, value: String): Path =
-            require(value.isNotBlank()) { "Configuration path must not be blank." }
-                .let { Path.of(value).let { path -> if (path.isAbsolute) path else baseDirectory.resolve(path) }.normalize() }
-
         private fun parseIpAddress(value: String, name: String): String {
             require(value.isNotBlank()) { "$name must not be blank." }
             require(value.contains(':') || value.matches(Regex("""\d{1,3}(\.\d{1,3}){3}"""))) {
@@ -66,6 +62,10 @@ internal data class ServerConfiguration(
             val address = InetAddress.getByName(value)
             return address.hostAddress
         }
+
+        private fun resolve(baseDirectory: Path, value: String): Path =
+            require(value.isNotBlank()) { "Configuration path must not be blank." }
+                .let { Path.of(value).let { path -> if (path.isAbsolute) path else baseDirectory.resolve(path) }.normalize() }
 
         private fun <K, V> Iterable<Pair<K, V>>.associateStrictly(): Map<K, V> =
             associate { pair ->

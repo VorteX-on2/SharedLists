@@ -9,7 +9,6 @@ import dev.sharedlists.protocol.Live
 import dev.sharedlists.protocol.ServerFault
 import dev.sharedlists.protocol.ServerFaultReason
 import dev.sharedlists.protocol.SharedListsGrpcKt
-import dev.sharedlists.protocol.Snapshot
 import dev.sharedlists.protocol.SnapshotBatch
 import dev.sharedlists.protocol.SyncRequest
 import dev.sharedlists.protocol.SyncResponse
@@ -78,13 +77,6 @@ internal class SharedListsService(
                                 phase = Phase.SYNCING
                                 lastDeliveredRevision = opening.snapshot.revision
                                 send(emptySnapshot(opening.snapshot))
-                            }
-
-                            is Opening.LegacySnapshot -> {
-                                generation = opening.snapshot.generation
-                                phase = Phase.SYNCING
-                                lastDeliveredRevision = opening.snapshot.revision
-                                send(snapshotResponse(opening.snapshot))
                             }
 
                             is Opening.Live -> {
@@ -226,7 +218,9 @@ internal class SharedListsService(
             if (snapshot.lists.isEmpty() && snapshot.tombstones.isEmpty()) {
                 Opening.EmptySnapshot(snapshot)
             } else if (!request.open.supportsBoundedTransfer) {
-                Opening.LegacySnapshot(snapshot)
+                throw Status.FAILED_PRECONDITION
+                    .withDescription("client must support bounded synchronization transfer")
+                    .asRuntimeException()
             } else {
                 Opening.Snapshot(SnapshotTransfer(snapshot, maximumBatchRecords))
             }
@@ -250,15 +244,6 @@ internal class SharedListsService(
     private fun emptySnapshot(snapshot: CanonicalSnapshot): SyncResponse =
         SyncResponse.newBuilder().setEmptySnapshot(
             EmptySnapshot.newBuilder().setGeneration(snapshot.generation).setRevision(snapshot.revision),
-        ).build()
-
-    private fun snapshotResponse(snapshot: CanonicalSnapshot): SyncResponse =
-        SyncResponse.newBuilder().setSnapshot(
-            Snapshot.newBuilder()
-                .setGeneration(snapshot.generation)
-                .setRevision(snapshot.revision)
-                .addAllLists(snapshot.lists)
-                .addAllTombstones(snapshot.tombstones),
         ).build()
 
     private fun journal(generation: String, entries: List<JournalEntry>): SyncResponse =
@@ -315,7 +300,6 @@ internal class SharedListsService(
     private sealed interface Opening {
         data class EmptySnapshot(val snapshot: CanonicalSnapshot) : Opening
         data class Journal(val generation: String, val entries: List<JournalEntry>) : Opening
-        data class LegacySnapshot(val snapshot: CanonicalSnapshot) : Opening
         data class Live(val snapshot: CanonicalSnapshot) : Opening
         data class Snapshot(val transfer: SnapshotTransfer) : Opening
     }

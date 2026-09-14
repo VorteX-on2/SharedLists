@@ -170,3 +170,7 @@ interface SharedListsClient {
 
     suspend fun submit(command: EditCommand): ClientState
 }
+
+interface ObservableSharedListsClient {
+    fun observeState(observer: (ClientState.Ready) -> Unit)
+}

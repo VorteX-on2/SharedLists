@@ -125,6 +125,7 @@ class WindowsClientFrame(
         itemView.addListSelectionListener {
             itemTextField.text = itemView.selectedValue?.text.orEmpty()
             markedCheckBox.isSelected = itemView.selectedValue?.marked ?: false
+            updateReorderButtonState()
         }
         itemView.addMouseListener(
             object : MouseAdapter() {
@@ -251,8 +252,7 @@ class WindowsClientFrame(
             hideMarkedCheckBox.isSelected = presentation.hideMarked
             alphabeticalSortCheckBox.isEnabled = presentation.editingEnabled
             hideMarkedCheckBox.isEnabled = presentation.editingEnabled
-            moveUpButton.isEnabled = presentation.reorderingEnabled && itemView.selectedIndex > 0
-            moveDownButton.isEnabled = presentation.reorderingEnabled && itemView.selectedIndex in 0 until itemModel.size - 1
+            updateReorderButtonState()
             createDeviceKeyButton.isVisible = presentation.setupRequired
             exportDeviceKeyButton.isVisible = presentation.exportRequired
             resetDeviceButton.isVisible = !presentation.setupRequired && !presentation.unreadableDeviceKey
@@ -358,6 +358,12 @@ class WindowsClientFrame(
         val list = listView.selectedValue ?: return
         val item = itemModel.getElementAt(sourceIndex)
         controller.moveItem(list.id, item.id, destinationIndex)
+    }
+
+    private fun updateReorderButtonState() {
+        val reorderingEnabled = controller.presentation().reorderingEnabled
+        moveUpButton.isEnabled = reorderingEnabled && itemView.selectedIndex > 0
+        moveDownButton.isEnabled = reorderingEnabled && itemView.selectedIndex in 0 until itemModel.size - 1
     }
 
     private fun renameSelectedList() {

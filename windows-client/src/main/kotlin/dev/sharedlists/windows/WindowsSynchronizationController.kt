@@ -18,6 +18,7 @@ import dev.sharedlists.client.ListItemId
 import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
+import dev.sharedlists.client.ObservableSharedListsClient
 import dev.sharedlists.client.RenameList
 import dev.sharedlists.client.ServerEndpoint
 import dev.sharedlists.client.SetMarked
@@ -275,6 +276,13 @@ class WindowsSynchronizationController(
                         result.fold(
                             onSuccess = {
                                 liveClient = client
+                                if (client is ObservableSharedListsClient) {
+                                    client.observeState { state ->
+                                        if (isCurrentConnectionAttempt(attempt)) {
+                                            showReadyState(state)
+                                        }
+                                    }
+                                }
                                 showClientState(it)
                             },
                             onFailure = { showConnectionFailure() },

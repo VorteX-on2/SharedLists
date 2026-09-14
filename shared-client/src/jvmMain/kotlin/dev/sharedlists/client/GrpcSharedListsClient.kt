@@ -157,9 +157,10 @@ class GrpcSharedListsClient(
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
-) : SharedListsClient {
+) : ObservableSharedListsClient, SharedListsClient {
     private var activeSession: ActiveSession? = null
     private var cachedState = stateStore.loadCanonicalState()
+    private var stateObserver: (ClientState.Ready) -> Unit = {}
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override suspend fun synchronize(): ClientState {
@@ -203,6 +204,11 @@ class GrpcSharedListsClient(
     override suspend fun submit(command: EditCommand): ClientState {
         val session = requireNotNull(activeSession) { "Synchronization is not live." }
         return session.submit(command)
+    }
+
+    override fun observeState(observer: (ClientState.Ready) -> Unit) {
+        stateObserver = observer
+        activeSession?.let { observer(it.ready()) }
     }
 
     private inner class ActiveSession(
@@ -418,6 +424,7 @@ class GrpcSharedListsClient(
             }
             cursor = SynchronizationCursor(cursor.generation, entry.revision)
             persistAndAcknowledge()
+            stateObserver(ready())
             if (unconfirmedOutcome != null && operation.operationId == unconfirmedOperationId) {
                 unconfirmedOutcome?.complete(DurableOperationOutcome(OperationId.parse(operation.operationId), entry.outcome.toClientOutcome()))
             }

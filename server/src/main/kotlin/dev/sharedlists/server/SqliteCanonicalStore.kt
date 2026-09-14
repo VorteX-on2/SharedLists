@@ -522,33 +522,11 @@ internal class SqliteCanonicalStore(
             }
 
             Type.DELETE_ITEM -> {
-                val position = connection.prepareStatement(
-                    "SELECT position FROM list_items WHERE id = ? AND list_id = ?",
-                ).use { statement ->
-                    statement.setString(1, operation.itemId)
-                    statement.setString(2, operation.listId)
-                    statement.executeQuery().use { result ->
-                        check(result.next())
-                        result.getInt("position")
-                    }
-                }
                 connection.prepareStatement("DELETE FROM list_items WHERE id = ?").use { statement ->
                     statement.setString(1, operation.itemId)
                     statement.executeUpdate()
                 }
-                connection.prepareStatement(
-                    "UPDATE list_items SET position = position + 1000000 WHERE list_id = ? AND position > ?",
-                ).use { statement ->
-                    statement.setString(1, operation.listId)
-                    statement.setInt(2, position)
-                    statement.executeUpdate()
-                }
-                connection.prepareStatement(
-                    "UPDATE list_items SET position = position - 1000001 WHERE list_id = ? AND position > 1000000",
-                ).use { statement ->
-                    statement.setString(1, operation.listId)
-                    statement.executeUpdate()
-                }
+                writePositions(operation.listId, items(operation.listId).map { it.id })
                 connection.prepareStatement(
                     "INSERT INTO item_tombstones (item_id, deleted_revision) VALUES (?, ?)",
                 ).use { statement ->
@@ -572,7 +550,7 @@ internal class SqliteCanonicalStore(
     }
 
     private fun writePositions(listId: String, itemIds: List<String>) {
-        connection.prepareStatement("UPDATE list_items SET position = position + 1000000 WHERE list_id = ?").use { statement ->
+        connection.prepareStatement("UPDATE list_items SET position = -position - 1 WHERE list_id = ?").use { statement ->
             statement.setString(1, listId)
             statement.executeUpdate()
         }

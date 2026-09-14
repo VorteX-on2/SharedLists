@@ -166,28 +166,31 @@ internal class SqliteCanonicalStore(
         metadata.copy(lists = lists, tombstones = tombstones)
     }
 
-    fun journalAfter(revision: Long): List<JournalEntry> = synchronized(lock) {
-        journalAfterLocked(revision)
+    fun journalAfter(revision: Long, limit: Int = Int.MAX_VALUE): List<JournalEntry> = synchronized(lock) {
+        journalAfterLocked(revision, limit)
     }
 
-    fun catchUpAfter(revision: Long): CanonicalCatchUp = synchronized(lock) {
-        CanonicalCatchUp(metadata(), journalAfterLocked(revision))
+    fun catchUpAfter(revision: Long, limit: Int = Int.MAX_VALUE): CanonicalCatchUp = synchronized(lock) {
+        CanonicalCatchUp(metadata(), journalAfterLocked(revision, limit))
     }
 
-    private fun journalAfterLocked(revision: Long): List<JournalEntry> =
-        connection.prepareStatement(
+    private fun journalAfterLocked(revision: Long, limit: Int): List<JournalEntry> {
+        require(limit > 0)
+        return connection.prepareStatement(
             """
             SELECT revision, operation_id, operation_type, list_id, list_name, item_id, item_text,
                    marked_value, predecessor_item_id, successor_item_id, outcome
-            FROM operation_journal WHERE revision > ? ORDER BY revision
+            FROM operation_journal WHERE revision > ? ORDER BY revision LIMIT ?
             """.trimIndent(),
         ).use { statement ->
             statement.setLong(1, revision)
+            statement.setInt(2, limit)
             statement.executeQuery().use { result ->
                 buildList {
                     while (result.next()) {
                         add(result.journalEntry())
                     }
+                }
                 }
             }
     }

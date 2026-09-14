@@ -51,6 +51,27 @@ class SharedListsClientTest {
         }
     }
 
+    @Test
+    fun `file state store retains and clears the one unconfirmed operation`() {
+        val directory = Files.createTempDirectory("sharedlists-client-operation-")
+        val store = FileClientStateStore(directory.resolve("state.properties").toFile())
+        val command = CreateList(
+            operationId = OperationId.parse("11111111-1111-4111-8111-111111111111"),
+            listId = SharedListId.parse("21111111-1111-4111-8111-111111111111"),
+            name = "Groceries",
+        )
+
+        try {
+            store.saveUnconfirmedOperation(command)
+
+            assertEquals(command, FileClientStateStore(directory.resolve("state.properties").toFile()).loadUnconfirmedOperation())
+            store.clearLocalState()
+            assertEquals(null, store.loadUnconfirmedOperation())
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
     private class StaticSharedListsClient(
         private val state: ClientState,
     ) : SharedListsClient {

@@ -1,6 +1,7 @@
 package dev.sharedlists.windows
 
 import dev.sharedlists.client.CanonicalState
+import dev.sharedlists.client.CachedSharedListsClient
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
 import dev.sharedlists.client.CreateItem
@@ -12,9 +13,11 @@ import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EditItemText
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
+import dev.sharedlists.client.ForegroundSharedListsClient
 import dev.sharedlists.client.GrpcSharedListsClient
 import dev.sharedlists.client.ListItem
 import dev.sharedlists.client.ListItemId
+import dev.sharedlists.client.LocalStateResettableClient
 import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.OperationId
 import dev.sharedlists.client.OperationOutcome
@@ -40,6 +43,10 @@ data class ServerConfiguration(
 
 interface WindowsClientFactory {
     fun create(configuration: ServerConfiguration): SharedListsClient
+}
+
+interface WindowsLocalStateResetter {
+    fun resetLocalState(configuration: ServerConfiguration)
 }
 
 data class WindowsListRow(
@@ -72,9 +79,22 @@ fun interface SynchronizationRunner {
     fun run(block: () -> Unit)
 }
 
+fun interface RetryScheduler {
+    fun schedule(delayMillis: Long, block: () -> Unit)
+}
+
 object BackgroundSynchronizationRunner : SynchronizationRunner {
     override fun run(block: () -> Unit) {
         Thread(block).start()
+    }
+}
+
+object BackgroundRetryScheduler : RetryScheduler {
+    override fun schedule(delayMillis: Long, block: () -> Unit) {
+        Thread {
+            Thread.sleep(delayMillis)
+            block()
+        }.start()
     }
 }
 
@@ -134,6 +154,10 @@ class WindowsGrpcClientFactory(
                 stateStore = FileClientStateStore(stateStore),
             )
         } ?: UnconfiguredSharedListsClient
+
+    fun resetLocalState(configuration: ServerConfiguration) {
+        FileClientStateStore(stateStore).clearLocalState()
+    }
 }
 
 data class WindowsClientPresentation(
@@ -145,9 +169,12 @@ data class WindowsClientPresentation(
     val exportRequired: Boolean = false,
     val cards: List<WindowsListCard> = emptyList(),
     val lists: List<String>,
+    val retryAvailable: Boolean = false,
+    val resetLocalDataAvailable: Boolean = false,
     val sharedLists: List<WindowsListRow> = emptyList(),
     val statusMessage: String?,
     val setupRequired: Boolean,
+    val takeoverAvailable: Boolean = false,
     val unreadableDeviceKey: Boolean,
     val alphabeticalSort: Boolean = false,
     val hideMarked: Boolean = false,
@@ -168,14 +195,18 @@ class WindowsSynchronizationController(
     private val clientFactory: WindowsClientFactory,
     private val configurationStore: ServerConfigurationStore = PreferencesServerConfigurationStore(),
     private val deviceEnrollment: WindowsDeviceEnrollment? = null,
+    private val retryScheduler: RetryScheduler = BackgroundRetryScheduler,
     private val synchronizationRunner: SynchronizationRunner = BackgroundSynchronizationRunner,
 ) {
     private var cachedState = CanonicalState()
     private var alphabeticalSort = false
     private var connectionAttempt = 0L
     private var deviceKeyUnreadable = false
+    private var foreground = true
     private var hideMarked = false
     private var liveClient: SharedListsClient? = null
+    private var networkAvailable = true
+    private var periodicRetryEnabled = true
     private var stateChanged: (WindowsClientPresentation) -> Unit = {}
     private val storedConfiguration = configurationStore.load()
     private var presentation = WindowsClientPresentation(
@@ -249,11 +280,104 @@ class WindowsSynchronizationController(
             return
         }
         configurationStore.save(parsedConfiguration)
+        startConnection(parsedConfiguration)
+    }
+
+    fun onBackground() {
+        foreground = false
+        nextConnectionAttempt()
+        cancelForegroundSynchronization()
+        update(
+            presentation.copy(
+                connectionActive = false,
+                editability = Editability.READ_ONLY,
+                statusMessage = "Synchronization paused while the app is in the background",
+            ),
+        )
+    }
+
+    fun onForeground() {
+        foreground = true
+        if (!periodicRetryEnabled) {
+            periodicRetryEnabled = true
+        }
+        presentation.configuration?.let(::startConnection)
+    }
+
+    fun retryNow() {
+        periodicRetryEnabled = true
+        presentation.configuration?.let(::startConnection)
+    }
+
+    fun resetLocalSynchronizationData() {
+        val configuration = presentation.configuration ?: return
+        cancelForegroundSynchronization()
+        val client = try {
+            clientFactory.create(configuration)
+        } catch (exception: IllegalArgumentException) {
+            showCorruptLocalState()
+            return
+        }
+        val resettableClient = client as? LocalStateResettableClient
+        if (resettableClient == null) {
+            update(presentation.copy(statusMessage = "Local synchronization reset is unavailable."))
+            return
+        }
+        resettableClient.resetLocalState()
+        cachedState = CanonicalState()
+        update(
+            presentation.copy(
+                cards = emptyList(),
+                editability = Editability.READ_ONLY,
+                emptyStateMessage = "Local synchronized data was reset. Reconnect to take a fresh snapshot.",
+                lists = emptyList(),
+                resetLocalDataAvailable = false,
+                sharedLists = emptyList(),
+                statusMessage = "Local synchronization data reset",
+            ),
+        )
+    }
+
+    fun setNetworkAvailable(available: Boolean) {
+        networkAvailable = available
+        if (!available) {
+            nextConnectionAttempt()
+            cancelForegroundSynchronization()
+            update(presentation.copy(connectionActive = false, editability = Editability.READ_ONLY, statusMessage = "Waiting for network connection"))
+        } else if (foreground && periodicRetryEnabled) {
+            retryNow()
+        }
+    }
+
+    fun takeOverSynchronization() {
+        periodicRetryEnabled = true
+        presentation.configuration?.let(::startConnection)
+    }
+
+    private fun startConnection(configuration: ServerConfiguration) {
+        if (!foreground || !networkAvailable) {
+            return
+        }
+        cancelForegroundSynchronization()
         val attempt = nextConnectionAttempt()
+        val client = try {
+            clientFactory.create(configuration)
+        } catch (exception: IllegalArgumentException) {
+            val resetter = clientFactory as? WindowsGrpcClientFactory
+            if (resetter == null) {
+                showCorruptLocalState()
+                return
+            }
+            resetter.resetLocalState(configuration)
+            cachedState = CanonicalState()
+            update(presentation.copy(resetLocalDataAvailable = false, statusMessage = "Local synchronization data reset"))
+            return
+        }
+        cachedState = (client as? CachedSharedListsClient)?.cachedCanonicalState() ?: cachedState
         update(
             presentation.copy(
                 connectionActive = true,
-                configuration = parsedConfiguration,
+                configuration = configuration,
                 editability = Editability.READ_ONLY,
                 emptyStateMessage = if (cachedState.lists.isEmpty()) "Connecting to synchronized lists…" else null,
                 lists = cachedState.lists.map { list -> list.name },
@@ -261,7 +385,7 @@ class WindowsSynchronizationController(
                 statusMessage = "Connecting…",
             ),
         )
-        val client = clientFactory.create(parsedConfiguration)
+        liveClient = client
         synchronizationRunner.run {
             suspend {
                 client.synchronize()
@@ -285,7 +409,7 @@ class WindowsSynchronizationController(
                                 }
                                 showClientState(it)
                             },
-                            onFailure = { showConnectionFailure() },
+                            onFailure = { showConnectionFailure(attempt) },
                         )
                     }
                 },
@@ -473,6 +597,13 @@ class WindowsSynchronizationController(
     }
 
     private fun showConnectionFailure() {
+        showConnectionFailure(connectionAttempt)
+    }
+
+    private fun showConnectionFailure(attempt: Long) {
+        if (!isCurrentConnectionAttempt(attempt)) {
+            return
+        }
         update(
             presentation.copy(
                 connectionActive = false,
@@ -481,9 +612,11 @@ class WindowsSynchronizationController(
                 lists = cachedState.lists.map { list -> list.name },
                 sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
                 cards = cards(),
+                retryAvailable = true,
                 statusMessage = "Disconnected — retry when the server is available",
             ),
         )
+        scheduleRetry(attempt)
     }
 
     private fun showFailure(enrollment: EnrollmentState) {
@@ -511,7 +644,10 @@ class WindowsSynchronizationController(
                 lists = cachedState.lists.map { list -> list.name },
                 sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
                 cards = cards(),
+                retryAvailable = clientState.connectivity != ConnectivityState.LIVE,
+                resetLocalDataAvailable = clientState.connectivity == ConnectivityState.FATAL,
                 statusMessage = statusMessage(clientState, isLive),
+                takeoverAvailable = clientState.connectivity == ConnectivityState.SUPERSEDED,
                 alphabeticalSort = alphabeticalSort,
                 hideMarked = hideMarked,
             ),
@@ -526,6 +662,12 @@ class WindowsSynchronizationController(
                     },
                 ),
             )
+        }
+        when (clientState.connectivity) {
+            ConnectivityState.FAILED -> scheduleRetry(connectionAttempt)
+            ConnectivityState.FATAL -> periodicRetryEnabled = false
+            ConnectivityState.SUPERSEDED -> periodicRetryEnabled = false
+            else -> Unit
         }
     }
 
@@ -565,8 +707,39 @@ class WindowsSynchronizationController(
             isLive -> "Device enrolled and synchronized"
             clientState.connectivity == ConnectivityState.CONNECTING -> "Connecting…"
             clientState.connectivity == ConnectivityState.SYNCHRONIZING -> "Synchronizing…"
+            clientState.connectivity == ConnectivityState.SUPERSEDED -> "Synchronization was superseded — take over to reconnect"
+            clientState.connectivity == ConnectivityState.FATAL -> "Server reported a fatal fault — retry manually or return to the app"
             else -> "Disconnected — cached lists are read-only"
         }
+
+    private fun cancelForegroundSynchronization() {
+        (liveClient as? ForegroundSharedListsClient)?.cancelForegroundSynchronization()
+        liveClient = null
+    }
+
+    private fun showCorruptLocalState() {
+        periodicRetryEnabled = false
+        update(
+            presentation.copy(
+                connectionActive = false,
+                editability = Editability.READ_ONLY,
+                emptyStateMessage = "Local synchronization data is unreadable. Reset local data to take a fresh snapshot; device setup is preserved.",
+                resetLocalDataAvailable = true,
+                statusMessage = "Local synchronization data requires recovery",
+            ),
+        )
+    }
+
+    private fun scheduleRetry(attempt: Long) {
+        if (!foreground || !networkAvailable || !periodicRetryEnabled) {
+            return
+        }
+        retryScheduler.schedule(RETRY_DELAY_MILLIS) {
+            if (isCurrentConnectionAttempt(attempt) && foreground && networkAvailable && periodicRetryEnabled) {
+                presentation.configuration?.let(::startConnection)
+            }
+        }
+    }
 
     private fun submit(
         name: String?,
@@ -636,6 +809,7 @@ class WindowsSynchronizationController(
         private const val ITEM_TEXT_LIMIT = 500
         private const val LIST_NAME_LIMIT = 100
         private const val MAXIMUM_CARD_ITEMS = 4
+        private const val RETRY_DELAY_MILLIS = 5_000L
         private val FINGERPRINT = Regex("^[0-9A-F]{64}$")
     }
 }

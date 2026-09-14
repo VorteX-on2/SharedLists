@@ -1,6 +1,7 @@
 package dev.sharedlists.client
 
 import dev.sharedlists.protocol.AppliedThrough
+import dev.sharedlists.protocol.AppliedSnapshotBatch
 import dev.sharedlists.protocol.ChallengeRequest
 import dev.sharedlists.protocol.ClientOperation
 import dev.sharedlists.protocol.CreateItem as ProtoCreateItem
@@ -16,6 +17,7 @@ import dev.sharedlists.protocol.OperationOutcome as ProtoOperationOutcome
 import dev.sharedlists.protocol.RenameList as ProtoRenameList
 import dev.sharedlists.protocol.SetMarked as ProtoSetMarked
 import dev.sharedlists.protocol.SharedListsGrpcKt
+import dev.sharedlists.protocol.SnapshotBatch
 import dev.sharedlists.protocol.SubmitOperation
 import dev.sharedlists.protocol.SyncRequest
 import dev.sharedlists.protocol.SyncResponse
@@ -26,6 +28,9 @@ import io.grpc.ClientInterceptor
 import io.grpc.ForwardingClientCall
 import io.grpc.Metadata
 import io.grpc.MethodDescriptor
+import io.grpc.Status
+import io.grpc.StatusException
+import io.grpc.StatusRuntimeException
 import io.grpc.netty.GrpcSslContexts
 import io.grpc.netty.NettyChannelBuilder
 import io.netty.handler.ssl.util.SimpleTrustManagerFactory
@@ -38,6 +43,7 @@ import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import java.time.Instant
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import java.util.Properties
 import javax.net.ssl.ManagerFactoryParameters
 import javax.net.ssl.TrustManager
@@ -71,11 +77,20 @@ interface ClientStateStore {
     fun save(canonicalState: CanonicalState, cursor: SynchronizationCursor) {
         save(cursor)
     }
+
+    fun clearLocalState() = Unit
+
+    fun clearUnconfirmedOperation() = Unit
+
+    fun loadUnconfirmedOperation(): EditCommand? = null
+
+    fun saveUnconfirmedOperation(command: EditCommand) = Unit
 }
 
 class FileClientStateStore(
     private val file: File,
 ) : ClientStateStore {
+    private val unconfirmedFile = File(requireNotNull(file.parentFile), "${file.name}.unconfirmed")
     override fun hasCanonicalState(): Boolean =
         file.exists() && Properties().also { properties -> file.inputStream().use(properties::load) }
             .containsKey("list.count")
@@ -151,15 +166,108 @@ class FileClientStateStore(
             StandardCopyOption.REPLACE_EXISTING,
         )
     }
+
+    override fun clearLocalState() {
+        Files.deleteIfExists(file.toPath())
+        clearUnconfirmedOperation()
+    }
+
+    override fun clearUnconfirmedOperation() {
+        Files.deleteIfExists(unconfirmedFile.toPath())
+    }
+
+    override fun loadUnconfirmedOperation(): EditCommand? {
+        if (!unconfirmedFile.exists()) {
+            return null
+        }
+        return Properties().also { properties -> unconfirmedFile.inputStream().use(properties::load) }
+            .let(OperationCodec::decode)
+    }
+
+    override fun saveUnconfirmedOperation(command: EditCommand) {
+        val parent = requireNotNull(unconfirmedFile.parentFile)
+        parent.mkdirs()
+        val temporaryFile = Files.createTempFile(parent.toPath(), "${unconfirmedFile.name}.", ".tmp")
+        FileOutputStream(temporaryFile.toFile()).use { stream ->
+            OperationCodec.encode(command).store(stream, null)
+            stream.fd.sync()
+        }
+        Files.move(temporaryFile, unconfirmedFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+
+private object OperationCodec {
+    fun decode(properties: Properties): EditCommand {
+        val operationId = OperationId.parse(required(properties, "operationId"))
+        val listId = SharedListId.parse(required(properties, "listId"))
+        val itemId = properties.getProperty("itemId")?.let(ListItemId::parse)
+        return when (required(properties, "type")) {
+            "create-list" -> CreateList(operationId, listId, required(properties, "name"))
+            "delete-list" -> DeleteList(operationId, listId)
+            "rename-list" -> RenameList(operationId, listId, required(properties, "name"))
+            "create-item" -> CreateItem(requireNotNull(itemId), listId, operationId, required(properties, "text"))
+            "delete-item" -> DeleteItem(requireNotNull(itemId), listId, operationId)
+            "edit-item-text" -> EditItemText(requireNotNull(itemId), listId, operationId, required(properties, "text"))
+            "move-item" -> MoveItem(
+                requireNotNull(itemId),
+                listId,
+                operationId,
+                properties.getProperty("predecessorItemId")?.let(ListItemId::parse),
+                properties.getProperty("successorItemId")?.let(ListItemId::parse),
+            )
+            "set-marked" -> SetMarked(requireNotNull(itemId), listId, operationId, required(properties, "value").toBooleanStrict())
+            else -> error("Unconfirmed operation has an unknown type.")
+        }
+    }
+
+    fun encode(command: EditCommand): Properties =
+        Properties().apply {
+            setProperty("operationId", command.operationId.value)
+            when (command) {
+                is CreateList -> {
+                    setProperty("listId", command.listId.value)
+                    setProperty("name", command.name)
+                    setProperty("type", "create-list")
+                }
+                is DeleteList -> {
+                    setProperty("listId", command.listId.value)
+                    setProperty("type", "delete-list")
+                }
+                is RenameList -> {
+                    setProperty("listId", command.listId.value)
+                    setProperty("name", command.name)
+                    setProperty("type", "rename-list")
+                }
+                is CreateItem -> item(command.listId, command.itemId, "create-item").also { setProperty("text", command.text) }
+                is DeleteItem -> item(command.listId, command.itemId, "delete-item")
+                is EditItemText -> item(command.listId, command.itemId, "edit-item-text").also { setProperty("text", command.text) }
+                is MoveItem -> {
+                    item(command.listId, command.itemId, "move-item")
+                    command.predecessorItemId?.let { setProperty("predecessorItemId", it.value) }
+                    command.successorItemId?.let { setProperty("successorItemId", it.value) }
+                }
+                is SetMarked -> item(command.listId, command.itemId, "set-marked").also { setProperty("value", command.value.toString()) }
+            }
+        }
+
+    private fun Properties.item(listId: SharedListId, itemId: ListItemId, type: String) {
+        setProperty("itemId", itemId.value)
+        setProperty("listId", listId.value)
+        setProperty("type", type)
+    }
+
+    private fun required(properties: Properties, name: String): String =
+        requireNotNull(properties.getProperty(name)) { "Unconfirmed operation is missing $name." }
 }
 
 class GrpcSharedListsClient(
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
-) : ObservableSharedListsClient, SharedListsClient {
+) : CachedSharedListsClient, ForegroundSharedListsClient, LocalStateResettableClient, ObservableSharedListsClient, SharedListsClient {
     private var activeSession: ActiveSession? = null
     private var cachedState = stateStore.loadCanonicalState()
+    private var unconfirmedCommand = stateStore.loadUnconfirmedOperation()
     private var stateObserver: (ClientState.Ready) -> Unit = {}
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -167,6 +275,9 @@ class GrpcSharedListsClient(
         activeSession?.close()
         val channel = NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
             .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
+            .keepAliveTime(30, TimeUnit.SECONDS)
+            .keepAliveTimeout(10, TimeUnit.SECONDS)
+            .keepAliveWithoutCalls(true)
             .build()
         try {
             val unauthenticatedStub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
@@ -186,6 +297,7 @@ class GrpcSharedListsClient(
                 channel,
                 unauthenticatedStub.withInterceptors(BearerTokenInterceptor(token)),
                 cachedState,
+                unconfirmedCommand,
             )
             activeSession = session
             session.open(stateStore.loadCursor()?.takeIf { stateStore.hasCanonicalState() })
@@ -193,17 +305,36 @@ class GrpcSharedListsClient(
             check(live.generation == session.cursor.generation && live.revision == session.cursor.lastAppliedRevision) {
                 "Server declared an inconsistent live cursor."
             }
-            return session.ready()
+            val outcome = session.reconcileUnconfirmedOperation()
+            if (outcome != null) {
+                stateStore.clearUnconfirmedOperation()
+                unconfirmedCommand = null
+            }
+            return session.ready(outcome)
         } catch (exception: Exception) {
             channel.shutdownNow()
             activeSession = null
+            if (exception is ServerFaultException) {
+                return ClientState.Ready(
+                    enrollment = EnrollmentState.ENROLLED,
+                    connectivity = ConnectivityState.FATAL,
+                    canonicalState = cachedState,
+                    cursor = stateStore.loadCursor(),
+                )
+            }
             throw exception
         }
     }
 
     override suspend fun submit(command: EditCommand): ClientState {
+        check(unconfirmedCommand == null) { "An edit is already awaiting confirmation." }
         val session = requireNotNull(activeSession) { "Synchronization is not live." }
-        return session.submit(command)
+        unconfirmedCommand = command
+        stateStore.saveUnconfirmedOperation(command)
+        return session.submit(command).also {
+            stateStore.clearUnconfirmedOperation()
+            unconfirmedCommand = null
+        }
     }
 
     override fun observeState(observer: (ClientState.Ready) -> Unit) {
@@ -211,14 +342,34 @@ class GrpcSharedListsClient(
         activeSession?.let { observer(it.ready()) }
     }
 
+    override fun cachedCanonicalState(): CanonicalState = cachedState
+
+    override fun resetLocalState() {
+        cancelForegroundSynchronization()
+        stateStore.clearLocalState()
+        cachedState = CanonicalState()
+        unconfirmedCommand = null
+    }
+
+    override fun cancelForegroundSynchronization() {
+        activeSession?.cancel()
+        activeSession = null
+    }
+
     private inner class ActiveSession(
         private val channel: io.grpc.ManagedChannel,
         private val stub: SharedListsGrpcKt.SharedListsCoroutineStub,
         initialState: CanonicalState,
+        unconfirmedCommand: EditCommand?,
     ) {
         private var canonicalState = initialState
-        private var unconfirmedOperationId: String? = null
-        private var unconfirmedOutcome: CompletableDeferred<DurableOperationOutcome>? = null
+        private var snapshotBatchIndex = 0
+        private var snapshotGeneration: String? = null
+        private var snapshotRevision: Long? = null
+        private val stagedSnapshotLists = mutableListOf<SharedList>()
+        private var unconfirmedOperationId: String? = unconfirmedCommand?.operationId?.value
+        private var unconfirmedOutcome: CompletableDeferred<DurableOperationOutcome>? =
+            unconfirmedCommand?.let { CompletableDeferred() }
         private val requests = CoroutineChannel<SyncRequest>()
         private val responseJob = scope.launch {
             try {
@@ -239,6 +390,7 @@ class GrpcSharedListsClient(
             requests.send(
                 SyncRequest.newBuilder().setOpen(
                     OpenSync.newBuilder().also { open ->
+                        open.supportsBoundedTransfer = true
                         cursor?.let {
                             open.cursorBuilder.setGeneration(it.generation).setLastAppliedRevision(it.lastAppliedRevision)
                         }
@@ -263,9 +415,28 @@ class GrpcSharedListsClient(
             }
         }
 
+        suspend fun reconcileUnconfirmedOperation(): DurableOperationOutcome? {
+            val outcome = unconfirmedOutcome ?: return null
+            if (!outcome.isCompleted) {
+                val command = requireNotNull(unconfirmedCommand)
+                requests.send(
+                    SyncRequest.newBuilder().setSubmitOperation(
+                        SubmitOperation.newBuilder().setOperation(command.toProto()).build(),
+                    ).build(),
+                )
+            }
+            return outcome.await()
+        }
+
         suspend fun close() {
             requests.close()
             responseJob.cancelAndJoin()
+            channel.shutdownNow()
+        }
+
+        fun cancel() {
+            requests.cancel()
+            responseJob.cancel()
             channel.shutdownNow()
         }
 
@@ -302,9 +473,15 @@ class GrpcSharedListsClient(
                     ),
                 )
 
+                response.hasSnapshotBatch() -> acceptSnapshotBatch(response.snapshotBatch)
+
                 response.hasJournalBatch() -> {
                     if (!::cursor.isInitialized) {
-                        cursor = SynchronizationCursor(response.journalBatch.generation, 0)
+                        cursor = stateStore.loadCursor()
+                            ?.takeIf {
+                                stateStore.hasCanonicalState() && it.generation == response.journalBatch.generation
+                            }
+                            ?: SynchronizationCursor(response.journalBatch.generation, 0)
                     }
                     response.journalBatch.entriesList.forEach { entry -> apply(entry) }
                 }
@@ -315,8 +492,54 @@ class GrpcSharedListsClient(
                     }
                     live.complete(response.live)
                 }
+                response.hasServerFault() -> throw ServerFaultException(response.serverFault.reason.name)
                 else -> error("Server sent an unknown synchronization response.")
             }
+        }
+
+        private suspend fun acceptSnapshotBatch(batch: SnapshotBatch) {
+            if (snapshotGeneration == null) {
+                snapshotGeneration = batch.generation
+                snapshotRevision = batch.revision
+            }
+            check(
+                snapshotGeneration == batch.generation &&
+                    snapshotRevision == batch.revision &&
+                    snapshotBatchIndex == batch.batchIndex,
+            ) {
+                "Server snapshot batches must be contiguous and immutable."
+            }
+            stagedSnapshotLists += batch.listsList.map { list ->
+                SharedList(
+                    id = SharedListId.parse(list.id),
+                    items = list.itemsList.sortedBy { it.position }.map { item ->
+                        ListItem(ListItemId.parse(item.id), item.marked, item.text)
+                    },
+                    name = list.name,
+                )
+            }
+            if (batch.isLast) {
+                canonicalState = CanonicalState(stagedSnapshotLists.sortedBy { it.name.lowercase() })
+                cachedState = canonicalState
+                cursor = SynchronizationCursor(batch.generation, batch.revision)
+                stateStore.save(canonicalState, cursor)
+                requests.send(
+                    SyncRequest.newBuilder().setAppliedSnapshotBatch(
+                        AppliedSnapshotBatch.newBuilder()
+                            .setBatchIndex(batch.batchIndex)
+                            .setRevision(batch.revision),
+                    ).build(),
+                )
+                return
+            }
+            snapshotBatchIndex += 1
+            requests.send(
+                SyncRequest.newBuilder().setAppliedSnapshotBatch(
+                    AppliedSnapshotBatch.newBuilder()
+                        .setBatchIndex(batch.batchIndex)
+                        .setRevision(batch.revision),
+                ).build(),
+            )
         }
 
         private suspend fun acceptSnapshot(generation: String, revision: Long, state: CanonicalState) {
@@ -340,13 +563,17 @@ class GrpcSharedListsClient(
             val lists = canonicalState.lists.toMutableList()
             if (entry.outcome == ProtoOperationOutcome.OPERATION_OUTCOME_APPLIED) {
                 when (operation.operationCase) {
-                    ClientOperation.OperationCase.CREATE_LIST -> lists += SharedList(
-                        id = SharedListId.parse(operation.createList.listId),
-                        name = operation.createList.name,
-                    )
+                    ClientOperation.OperationCase.CREATE_LIST -> {
+                        if (lists.none { it.id.value == operation.createList.listId }) {
+                            lists += SharedList(
+                                id = SharedListId.parse(operation.createList.listId),
+                                name = operation.createList.name,
+                            )
+                        }
+                    }
                     ClientOperation.OperationCase.CREATE_ITEM -> {
                         val index = lists.indexOfFirst { it.id.value == operation.createItem.listId }
-                        if (index >= 0) {
+                        if (index >= 0 && lists[index].items.none { it.id.value == operation.createItem.itemId }) {
                             lists[index] = lists[index].copy(
                                 items = lists[index].items + ListItem(
                                     id = ListItemId.parse(operation.createItem.itemId),
@@ -448,7 +675,7 @@ class GrpcSharedListsClient(
             stateObserver(
                 ClientState.Ready(
                     enrollment = EnrollmentState.ENROLLED,
-                    connectivity = ConnectivityState.FAILED,
+                    connectivity = failureConnectivity(exception),
                     canonicalState = canonicalState,
                     cursor = if (::cursor.isInitialized) cursor else null,
                 ),
@@ -497,6 +724,28 @@ class GrpcSharedListsClient(
             }.build()
     }
 }
+
+private fun failureConnectivity(exception: Exception): ConnectivityState {
+    val status = when (exception) {
+        is StatusException -> exception.status
+        is StatusRuntimeException -> exception.status
+        else -> null
+    }
+    return when {
+        exception is ServerFaultException -> ConnectivityState.FATAL
+        status?.code == Status.Code.ABORTED && status.description == "session superseded" ->
+            ConnectivityState.SUPERSEDED
+        status?.code == Status.Code.DATA_LOSS ||
+            status?.code == Status.Code.INTERNAL ||
+            status?.code == Status.Code.FAILED_PRECONDITION ->
+            ConnectivityState.FATAL
+        else -> ConnectivityState.FAILED
+    }
+}
+
+private class ServerFaultException(
+    reason: String,
+) : IllegalStateException("Server fault: $reason")
 
 private fun ProtoOperationOutcome.toClientOutcome(): OperationOutcome =
     when (this) {

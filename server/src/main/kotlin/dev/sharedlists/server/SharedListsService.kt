@@ -6,11 +6,17 @@ import dev.sharedlists.protocol.EmptySnapshot
 import dev.sharedlists.protocol.JournalBatch
 import dev.sharedlists.protocol.JournalEntry
 import dev.sharedlists.protocol.Live
+import dev.sharedlists.protocol.ServerFault
+import dev.sharedlists.protocol.ServerFaultReason
 import dev.sharedlists.protocol.SharedListsGrpcKt
 import dev.sharedlists.protocol.Snapshot
+import dev.sharedlists.protocol.SnapshotBatch
 import dev.sharedlists.protocol.SyncRequest
 import dev.sharedlists.protocol.SyncResponse
 import io.grpc.Status
+import io.grpc.StatusRuntimeException
+import java.sql.SQLException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -21,7 +27,13 @@ import kotlinx.coroutines.launch
 internal class SharedListsService(
     private val authenticator: ChallengeAuthenticator,
     private val store: SqliteCanonicalStore,
+    private val maximumBatchRecords: Int = MAXIMUM_BATCH_RECORDS,
+    private val onFatalFault: (ServerFaultReason) -> Unit = {},
 ) : SharedListsGrpcKt.SharedListsCoroutineImplBase() {
+    init {
+        require(maximumBatchRecords > 0)
+    }
+
     override suspend fun getChallenge(request: ChallengeRequest): AuthenticationChallenge =
         try {
             authenticator.issue(request.keyFingerprint).toProto()
@@ -34,8 +46,8 @@ internal class SharedListsService(
         var phase = Phase.OPENING
         var generation = ""
         var lastAcknowledgedRevision = -1L
-        var synchronizedRevision = -1L
         var lastDeliveredRevision = -1L
+        var snapshotTransfer: SnapshotTransfer? = null
         val journalJob = launch(start = CoroutineStart.UNDISPATCHED) {
             store.journalEntries.collect { entry ->
                 if (events.trySend(Event.Journal(entry)).isFailure) {
@@ -54,13 +66,27 @@ internal class SharedListsService(
             for (event in events) {
                 when (event) {
                     is Event.Journal -> if (phase == Phase.LIVE && event.entry.revision > lastDeliveredRevision) {
-                        val entries = store.journalAfter(lastDeliveredRevision)
+                        val entries = store.journalAfter(lastDeliveredRevision, maximumBatchRecords)
                         send(journal(generation, entries))
                         lastDeliveredRevision = entries.last().revision
                     }
 
                     is Event.Request -> when (phase) {
                         Phase.OPENING -> when (val opening = open(event.request)) {
+                            is Opening.EmptySnapshot -> {
+                                generation = opening.snapshot.generation
+                                phase = Phase.SYNCING
+                                lastDeliveredRevision = opening.snapshot.revision
+                                send(emptySnapshot(opening.snapshot))
+                            }
+
+                            is Opening.LegacySnapshot -> {
+                                generation = opening.snapshot.generation
+                                phase = Phase.SYNCING
+                                lastDeliveredRevision = opening.snapshot.revision
+                                send(snapshotResponse(opening.snapshot))
+                            }
+
                             is Opening.Live -> {
                                 generation = opening.snapshot.generation
                                 phase = Phase.LIVE
@@ -70,36 +96,50 @@ internal class SharedListsService(
                             }
 
                             is Opening.Snapshot -> {
-                                generation = opening.snapshot.generation
-                                phase = Phase.SYNCING
-                                synchronizedRevision = opening.snapshot.revision
-                                lastDeliveredRevision = opening.snapshot.revision
-                                send(snapshotResponse(opening.snapshot))
+                                generation = opening.transfer.snapshot.generation
+                                phase = Phase.SNAPSHOTTING
+                                snapshotTransfer = opening.transfer
+                                send(opening.transfer.batch())
                             }
 
                             is Opening.Journal -> {
                                 generation = opening.generation
                                 phase = Phase.SYNCING
-                                synchronizedRevision = opening.entries.last().revision
-                                lastDeliveredRevision = synchronizedRevision
+                                lastDeliveredRevision = opening.entries.last().revision
                                 send(journal(generation, opening.entries))
                             }
                         }
 
-                        Phase.SYNCING -> {
-                            requireRequest(event.request.hasAppliedThrough() &&
-                                event.request.appliedThrough.revision == synchronizedRevision)
-                            lastAcknowledgedRevision = synchronizedRevision
-                            val catchUp = store.catchUpAfter(synchronizedRevision)
-                            if (catchUp.journalEntries.isEmpty()) {
-                                phase = Phase.LIVE
-                                lastDeliveredRevision = catchUp.snapshot.revision
-                                send(live(catchUp.snapshot))
+                        Phase.SNAPSHOTTING -> {
+                            val transfer = requireNotNull(snapshotTransfer)
+                            requireRequest(
+                                event.request.hasAppliedSnapshotBatch() &&
+                                    event.request.appliedSnapshotBatch.revision == transfer.snapshot.revision &&
+                                    event.request.appliedSnapshotBatch.batchIndex == transfer.index,
+                            )
+                            if (transfer.isLast) {
+                                snapshotTransfer = null
+                                val next = advanceAfterSynchronization(transfer.snapshot.revision)
+                                phase = next.phase
+                                lastAcknowledgedRevision = next.lastAcknowledgedRevision
+                                lastDeliveredRevision = next.lastDeliveredRevision
+                                next.response?.let { send(it) }
                             } else {
-                                synchronizedRevision = catchUp.journalEntries.last().revision
-                                lastDeliveredRevision = synchronizedRevision
-                                send(journal(generation, catchUp.journalEntries))
+                                snapshotTransfer = transfer.next()
+                                send(requireNotNull(snapshotTransfer).batch())
                             }
+                        }
+
+                        Phase.SYNCING -> {
+                            requireRequest(
+                                event.request.hasAppliedThrough() &&
+                                    event.request.appliedThrough.revision == lastDeliveredRevision,
+                            )
+                            val next = advanceAfterSynchronization(lastDeliveredRevision)
+                            phase = next.phase
+                            lastAcknowledgedRevision = next.lastAcknowledgedRevision
+                            lastDeliveredRevision = next.lastDeliveredRevision
+                            next.response?.let { send(it) }
                         }
 
                         Phase.LIVE -> {
@@ -128,15 +168,43 @@ internal class SharedListsService(
                             }
                         }
                     }
+
                     Event.Closed -> break
                 }
             }
         } catch (_: SlowConsumerException) {
             throw Status.RESOURCE_EXHAUSTED.withDescription("slow consumer overflow").asRuntimeException()
+        } catch (exception: StatusRuntimeException) {
+            throw exception
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            val fault = serverFault(exception)
+            send(fault)
+            onFatalFault(fault.serverFault.reason)
         } finally {
             journalJob.cancel()
             requestJob.cancel()
             events.close()
+        }
+    }
+
+    private fun advanceAfterSynchronization(revision: Long): SynchronizationAdvance {
+        val catchUp = store.catchUpAfter(revision, maximumBatchRecords)
+        return if (catchUp.journalEntries.isEmpty()) {
+            SynchronizationAdvance(
+                phase = Phase.LIVE,
+                lastAcknowledgedRevision = catchUp.snapshot.revision,
+                lastDeliveredRevision = catchUp.snapshot.revision,
+                response = live(catchUp.snapshot),
+            )
+        } else {
+            SynchronizationAdvance(
+                phase = Phase.SYNCING,
+                lastAcknowledgedRevision = revision,
+                lastDeliveredRevision = catchUp.journalEntries.last().revision,
+                response = journal(generation = catchUp.snapshot.generation, entries = catchUp.journalEntries),
+            )
         }
     }
 
@@ -152,33 +220,50 @@ internal class SharedListsService(
             if (cursor.lastAppliedRevision == snapshot.revision) {
                 Opening.Live(snapshot)
             } else {
-                Opening.Journal(snapshot.generation, store.journalAfter(cursor.lastAppliedRevision))
+                Opening.Journal(snapshot.generation, store.journalAfter(cursor.lastAppliedRevision, maximumBatchRecords))
             }
         } else {
-            Opening.Snapshot(snapshot)
+            if (snapshot.lists.isEmpty() && snapshot.tombstones.isEmpty()) {
+                Opening.EmptySnapshot(snapshot)
+            } else if (!request.open.supportsBoundedTransfer) {
+                Opening.LegacySnapshot(snapshot)
+            } else {
+                Opening.Snapshot(SnapshotTransfer(snapshot, maximumBatchRecords))
+            }
         }
     }
 
+    private fun SnapshotTransfer.batch(): SyncResponse =
+        SyncResponse.newBuilder().setSnapshotBatch(
+            SnapshotBatch.newBuilder()
+                .setGeneration(snapshot.generation)
+                .setRevision(snapshot.revision)
+                .setBatchIndex(index)
+                .setIsLast(isLast)
+                .addAllLists(snapshot.lists.drop(offset).take(maximumBatchRecords))
+                .addAllTombstones(
+                    snapshot.tombstones.drop((offset - snapshot.lists.size).coerceAtLeast(0))
+                        .take((maximumBatchRecords - (snapshot.lists.size - offset).coerceAtLeast(0)).coerceAtLeast(0)),
+                ),
+        ).build()
+
+    private fun emptySnapshot(snapshot: CanonicalSnapshot): SyncResponse =
+        SyncResponse.newBuilder().setEmptySnapshot(
+            EmptySnapshot.newBuilder().setGeneration(snapshot.generation).setRevision(snapshot.revision),
+        ).build()
+
     private fun snapshotResponse(snapshot: CanonicalSnapshot): SyncResponse =
-        if (snapshot.lists.isEmpty() && snapshot.tombstones.isEmpty()) {
-            SyncResponse.newBuilder().setEmptySnapshot(
-                EmptySnapshot.newBuilder().setGeneration(snapshot.generation).setRevision(snapshot.revision),
-            ).build()
-        } else {
-            SyncResponse.newBuilder().setSnapshot(
-                Snapshot.newBuilder()
-                    .setGeneration(snapshot.generation)
-                    .setRevision(snapshot.revision)
-                    .addAllLists(snapshot.lists)
-                    .addAllTombstones(snapshot.tombstones),
-            ).build()
-        }
+        SyncResponse.newBuilder().setSnapshot(
+            Snapshot.newBuilder()
+                .setGeneration(snapshot.generation)
+                .setRevision(snapshot.revision)
+                .addAllLists(snapshot.lists)
+                .addAllTombstones(snapshot.tombstones),
+        ).build()
 
     private fun journal(generation: String, entries: List<JournalEntry>): SyncResponse =
         SyncResponse.newBuilder().setJournalBatch(
-            JournalBatch.newBuilder()
-                .setGeneration(generation)
-                .addAllEntries(entries),
+            JournalBatch.newBuilder().setGeneration(generation).addAllEntries(entries),
         ).build()
 
     private fun journal(generation: String, entry: JournalEntry): SyncResponse = journal(generation, listOf(entry))
@@ -188,6 +273,33 @@ internal class SharedListsService(
             Live.newBuilder().setGeneration(snapshot.generation).setRevision(snapshot.revision),
         ).build()
 
+    private fun serverFault(exception: Exception): SyncResponse =
+        SyncResponse.newBuilder().setServerFault(
+            ServerFault.newBuilder().setReason(
+                when {
+                    exception is SQLException && exception.message.orEmpty().containsAny(
+                        "schema",
+                        "no such table",
+                        "no such column",
+                    ) ->
+                        ServerFaultReason.SERVER_FAULT_REASON_SCHEMA
+                    exception is SQLException && exception.message.orEmpty().containsAny(
+                        "corrupt",
+                        "malformed",
+                        "integrity",
+                    ) -> ServerFaultReason.SERVER_FAULT_REASON_INTEGRITY
+                    exception is SQLException ->
+                        ServerFaultReason.SERVER_FAULT_REASON_STORAGE
+                    exception is IllegalStateException ->
+                        ServerFaultReason.SERVER_FAULT_REASON_INTEGRITY
+                    else -> ServerFaultReason.SERVER_FAULT_REASON_INTERNAL
+                },
+            ),
+        ).build()
+
+    private fun String.containsAny(vararg values: String): Boolean =
+        values.any { contains(it, ignoreCase = true) }
+
     private fun requireRequest(valid: Boolean) {
         if (!valid) {
             throw Status.INVALID_ARGUMENT.withDescription("invalid synchronization sequence").asRuntimeException()
@@ -196,29 +308,50 @@ internal class SharedListsService(
 
     private sealed interface Event {
         data object Closed : Event
-
         data class Journal(val entry: JournalEntry) : Event
-
         data class Request(val request: SyncRequest) : Event
     }
 
     private sealed interface Opening {
+        data class EmptySnapshot(val snapshot: CanonicalSnapshot) : Opening
         data class Journal(val generation: String, val entries: List<JournalEntry>) : Opening
-
+        data class LegacySnapshot(val snapshot: CanonicalSnapshot) : Opening
         data class Live(val snapshot: CanonicalSnapshot) : Opening
-
-        data class Snapshot(val snapshot: CanonicalSnapshot) : Opening
+        data class Snapshot(val transfer: SnapshotTransfer) : Opening
     }
 
     private enum class Phase {
         OPENING,
+        SNAPSHOTTING,
         SYNCING,
         LIVE,
     }
 
+    private data class SnapshotTransfer(
+        val snapshot: CanonicalSnapshot,
+        val maximumBatchRecords: Int,
+        val index: Int = 0,
+    ) {
+        val offset: Int
+            get() = index * maximumBatchRecords
+
+        val isLast: Boolean
+            get() = offset + maximumBatchRecords >= snapshot.lists.size + snapshot.tombstones.size
+
+        fun next(): SnapshotTransfer = copy(index = index + 1)
+    }
+
+    private data class SynchronizationAdvance(
+        val phase: Phase,
+        val lastAcknowledgedRevision: Long,
+        val lastDeliveredRevision: Long,
+        val response: SyncResponse?,
+    )
+
     private class SlowConsumerException : Exception()
 
     private companion object {
+        const val MAXIMUM_BATCH_RECORDS = 100
         const val MAXIMUM_QUEUED_EVENTS = 128
     }
 }

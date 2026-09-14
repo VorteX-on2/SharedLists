@@ -17,6 +17,11 @@ kotlin {
         jvmTest.dependencies {
             implementation(kotlin("test-junit5"))
         }
+        jvmMain.dependencies {
+            implementation(project(":protocol"))
+            implementation("io.grpc:grpc-netty:1.81.0")
+            implementation("io.grpc:grpc-stub:1.81.0")
+        }
     }
 }
 

@@ -17,6 +17,7 @@ dependencyResolutionManagement {
 rootProject.name = "shared-lists"
 
 include(":shared-client")
+include(":protocol")
 include(":server")
 include(":windows-client")
 include(":android-client")

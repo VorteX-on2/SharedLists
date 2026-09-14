@@ -3,6 +3,7 @@ package dev.sharedlists.windows
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
+import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.SharedList
@@ -28,10 +29,12 @@ class WindowsSynchronizationControllerTest {
 
         assertEquals("Connecting…", controller.presentation().statusMessage)
         assertEquals("Connecting to synchronized lists…", controller.presentation().emptyStateMessage)
+        assertTrue(controller.presentation().connectionActive)
         assertFalse(controller.presentation().editingEnabled)
         facade.complete(liveState(CanonicalState()))
 
         assertNull(controller.presentation().statusMessage)
+        assertFalse(controller.presentation().connectionActive)
         assertEquals("No shared lists yet.", controller.presentation().emptyStateMessage)
         assertTrue(controller.presentation().editingEnabled)
         assertEquals("192.0.2.10", store.load()?.host)
@@ -93,6 +96,34 @@ class WindowsSynchronizationControllerTest {
         assertFalse(controller.presentation().editingEnabled)
     }
 
+    @Test
+    fun `completion from an older connection cannot replace the current state`() {
+        val firstFacade = DeferredSharedListsClient()
+        val secondFacade = DeferredSharedListsClient()
+        val controller = WindowsSynchronizationController(
+            clientFactory = SequentialWindowsClientFactory(firstFacade, secondFacade),
+            configurationStore = InMemoryServerConfigurationStore(),
+            synchronizationRunner = SynchronizationRunner { block -> block() },
+        )
+
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+        controller.connect("192.0.2.11", "8443", FINGERPRINT)
+        secondFacade.complete(liveState(CanonicalState()))
+        firstFacade.fail(IllegalStateException("older attempt"))
+
+        assertNull(controller.presentation().statusMessage)
+        assertTrue(controller.presentation().editingEnabled)
+    }
+
+    @Test
+    fun `configured factory creates the public grpc facade`() {
+        val factory = WindowsGrpcClientFactory(DeferredSharedListsClientSigner)
+
+        val client = factory.create(ServerConfiguration("192.0.2.10", 8443, FINGERPRINT))
+
+        assertTrue(client.javaClass.name.endsWith("GrpcSharedListsClient"))
+    }
+
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =
         ClientState.Ready(
             enrollment = EnrollmentState.ENROLLED,
@@ -134,6 +165,15 @@ class WindowsSynchronizationControllerTest {
         override fun create(configuration: ServerConfiguration): SharedListsClient = client
     }
 
+    private class SequentialWindowsClientFactory(
+        private vararg val clients: SharedListsClient,
+    ) : WindowsClientFactory {
+        private var nextClient = 0
+
+        override fun create(configuration: ServerConfiguration): SharedListsClient =
+            clients[nextClient++]
+    }
+
     private class InMemoryServerConfigurationStore : ServerConfigurationStore {
         private var configuration: ServerConfiguration? = null
 
@@ -142,6 +182,12 @@ class WindowsSynchronizationControllerTest {
         override fun save(configuration: ServerConfiguration) {
             this.configuration = configuration
         }
+    }
+
+    private object DeferredSharedListsClientSigner : DeviceSigner {
+        override val keyFingerprint: String = "test-key"
+
+        override fun signEs256(signingInput: ByteArray): ByteArray = ByteArray(64)
     }
 
     private companion object {

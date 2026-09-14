@@ -3,9 +3,14 @@ package dev.sharedlists.windows
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
+import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
+import dev.sharedlists.client.FileClientStateStore
+import dev.sharedlists.client.GrpcSharedListsClient
+import dev.sharedlists.client.ServerEndpoint
 import dev.sharedlists.client.SharedListsClient
+import java.io.File
 import java.util.prefs.Preferences
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.EmptyCoroutineContext
@@ -19,6 +24,10 @@ data class ServerConfiguration(
 
 interface WindowsClientFactory {
     fun create(configuration: ServerConfiguration): SharedListsClient
+}
+
+interface WindowsDeviceSignerProvider {
+    fun load(): DeviceSigner
 }
 
 fun interface SynchronizationRunner {
@@ -66,12 +75,26 @@ class PreferencesServerConfigurationStore(
     }
 }
 
-object UnconfiguredWindowsClientFactory : WindowsClientFactory {
+class WindowsGrpcClientFactory(
+    private val deviceSigner: DeviceSigner?,
+    private val stateStore: File = File(System.getProperty("user.home"), ".sharedlists/client-state.properties"),
+) : WindowsClientFactory {
     override fun create(configuration: ServerConfiguration): SharedListsClient =
-        UnconfiguredSharedListsClient
+        deviceSigner?.let { signer ->
+            GrpcSharedListsClient(
+                deviceSigner = signer,
+                endpoint = ServerEndpoint(
+                    host = configuration.host,
+                    port = configuration.port,
+                    certificatePin = configuration.certificateFingerprint,
+                ),
+                stateStore = FileClientStateStore(stateStore),
+            )
+        } ?: UnconfiguredSharedListsClient
 }
 
 data class WindowsClientPresentation(
+    val connectionActive: Boolean,
     val configuration: ServerConfiguration?,
     val editability: Editability,
     val emptyStateMessage: String?,
@@ -93,9 +116,11 @@ class WindowsSynchronizationController(
     private val synchronizationRunner: SynchronizationRunner = BackgroundSynchronizationRunner,
 ) {
     private var cachedState = CanonicalState()
+    private var connectionAttempt = 0L
     private var stateChanged: (WindowsClientPresentation) -> Unit = {}
     private val storedConfiguration = configurationStore.load()
     private var presentation = WindowsClientPresentation(
+        connectionActive = false,
         configuration = storedConfiguration,
         editability = Editability.READ_ONLY,
         emptyStateMessage = storedConfiguration
@@ -117,8 +142,10 @@ class WindowsSynchronizationController(
             return
         }
         configurationStore.save(parsedConfiguration)
+        val attempt = nextConnectionAttempt()
         update(
             presentation.copy(
+                connectionActive = true,
                 configuration = parsedConfiguration,
                 editability = Editability.READ_ONLY,
                 emptyStateMessage = if (cachedState.lists.isEmpty()) "Connecting to synchronized lists…" else null,
@@ -134,6 +161,9 @@ class WindowsSynchronizationController(
                     override val context = EmptyCoroutineContext
 
                     override fun resumeWith(result: Result<ClientState>) {
+                        if (!isCurrentConnectionAttempt(attempt)) {
+                            return
+                        }
                         result.fold(
                             onSuccess = ::showClientState,
                             onFailure = { showConnectionFailure() },
@@ -174,6 +204,7 @@ class WindowsSynchronizationController(
     private fun showConnectionFailure() {
         update(
             presentation.copy(
+                connectionActive = false,
                 editability = Editability.READ_ONLY,
                 emptyStateMessage = if (cachedState.lists.isEmpty()) "Unable to synchronize shared lists." else null,
                 lists = cachedState.lists.map { list -> list.name },
@@ -185,6 +216,7 @@ class WindowsSynchronizationController(
     private fun showFailure(enrollment: EnrollmentState) {
         update(
             presentation.copy(
+                connectionActive = false,
                 editability = Editability.READ_ONLY,
                 emptyStateMessage = failureMessage(enrollment),
                 lists = cachedState.lists.map { list -> list.name },
@@ -198,6 +230,7 @@ class WindowsSynchronizationController(
         val isLive = clientState.editingEnabled
         update(
             presentation.copy(
+                connectionActive = false,
                 editability = if (isLive) Editability.LIVE else Editability.READ_ONLY,
                 emptyStateMessage = emptyStateMessage(clientState, isLive),
                 lists = cachedState.lists.map { list -> list.name },
@@ -229,6 +262,15 @@ class WindowsSynchronizationController(
             clientState.connectivity == ConnectivityState.SYNCHRONIZING -> "Synchronizing…"
             else -> "Disconnected — cached lists are read-only"
         }
+
+    @Synchronized
+    private fun isCurrentConnectionAttempt(attempt: Long): Boolean = attempt == connectionAttempt
+
+    @Synchronized
+    private fun nextConnectionAttempt(): Long {
+        connectionAttempt += 1
+        return connectionAttempt
+    }
 
     private fun update(nextPresentation: WindowsClientPresentation) {
         presentation = nextPresentation

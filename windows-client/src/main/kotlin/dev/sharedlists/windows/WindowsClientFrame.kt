@@ -80,7 +80,10 @@ class WindowsClientFrame(
             presentation.lists.forEach(listModel::addElement)
             emptyStateLabel.text = presentation.emptyStateMessage.orEmpty()
             statusLabel.text = presentation.statusMessage.orEmpty()
-            connectButton.isEnabled = true
+            connectButton.isEnabled = !presentation.connectionActive
+            fingerprintField.isEnabled = !presentation.connectionActive
+            hostField.isEnabled = !presentation.connectionActive
+            portField.isEnabled = !presentation.connectionActive
         }
         if (SwingUtilities.isEventDispatchThread()) {
             applyPresentation()

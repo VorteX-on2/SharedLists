@@ -45,6 +45,10 @@ interface WindowsClientFactory {
     fun create(configuration: ServerConfiguration): SharedListsClient
 }
 
+interface WindowsLocalStateResetter {
+    fun resetLocalState(configuration: ServerConfiguration)
+}
+
 data class WindowsListRow(
     val id: SharedListId,
     val name: String,
@@ -150,6 +154,10 @@ class WindowsGrpcClientFactory(
                 stateStore = FileClientStateStore(stateStore),
             )
         } ?: UnconfiguredSharedListsClient
+
+    fun resetLocalState(configuration: ServerConfiguration) {
+        FileClientStateStore(stateStore).clearLocalState()
+    }
 }
 
 data class WindowsClientPresentation(
@@ -304,7 +312,12 @@ class WindowsSynchronizationController(
     fun resetLocalSynchronizationData() {
         val configuration = presentation.configuration ?: return
         cancelForegroundSynchronization()
-        val client = clientFactory.create(configuration)
+        val client = try {
+            clientFactory.create(configuration)
+        } catch (exception: IllegalArgumentException) {
+            showCorruptLocalState()
+            return
+        }
         val resettableClient = client as? LocalStateResettableClient
         if (resettableClient == null) {
             update(presentation.copy(statusMessage = "Local synchronization reset is unavailable."))
@@ -347,7 +360,19 @@ class WindowsSynchronizationController(
         }
         cancelForegroundSynchronization()
         val attempt = nextConnectionAttempt()
-        val client = clientFactory.create(configuration)
+        val client = try {
+            clientFactory.create(configuration)
+        } catch (exception: IllegalArgumentException) {
+            val resetter = clientFactory as? WindowsGrpcClientFactory
+            if (resetter == null) {
+                showCorruptLocalState()
+                return
+            }
+            resetter.resetLocalState(configuration)
+            cachedState = CanonicalState()
+            update(presentation.copy(resetLocalDataAvailable = false, statusMessage = "Local synchronization data reset"))
+            return
+        }
         cachedState = (client as? CachedSharedListsClient)?.cachedCanonicalState() ?: cachedState
         update(
             presentation.copy(
@@ -690,6 +715,19 @@ class WindowsSynchronizationController(
     private fun cancelForegroundSynchronization() {
         (liveClient as? ForegroundSharedListsClient)?.cancelForegroundSynchronization()
         liveClient = null
+    }
+
+    private fun showCorruptLocalState() {
+        periodicRetryEnabled = false
+        update(
+            presentation.copy(
+                connectionActive = false,
+                editability = Editability.READ_ONLY,
+                emptyStateMessage = "Local synchronization data is unreadable. Reset local data to take a fresh snapshot; device setup is preserved.",
+                resetLocalDataAvailable = true,
+                statusMessage = "Local synchronization data requires recovery",
+            ),
+        )
     }
 
     private fun scheduleRetry(attempt: Long) {

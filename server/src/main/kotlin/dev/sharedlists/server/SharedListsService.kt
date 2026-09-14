@@ -28,6 +28,7 @@ internal class SharedListsService(
     private val authenticator: ChallengeAuthenticator,
     private val store: SqliteCanonicalStore,
     private val maximumBatchRecords: Int = MAXIMUM_BATCH_RECORDS,
+    private val onFatalFault: (ServerFaultReason) -> Unit = {},
 ) : SharedListsGrpcKt.SharedListsCoroutineImplBase() {
     init {
         require(maximumBatchRecords > 0)
@@ -178,7 +179,9 @@ internal class SharedListsService(
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
-            send(serverFault(exception))
+            val fault = serverFault(exception)
+            send(fault)
+            onFatalFault(fault.serverFault.reason)
         } finally {
             journalJob.cancel()
             requestJob.cancel()

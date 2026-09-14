@@ -68,13 +68,15 @@ class AndroidKeystoreDeviceEnrollment(
     private fun generate(strongBox: Boolean): AndroidDeviceSigner =
         try {
             val pair = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, PROVIDER).run {
+                val specification = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setUserAuthenticationRequired(false)
+                if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    specification.setIsStrongBoxBacked(true)
+                }
                 initialize(
-                    KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
-                        .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-                        .setDigests(KeyProperties.DIGEST_SHA256)
-                        .setUserAuthenticationRequired(false)
-                        .setIsStrongBoxBacked(strongBox)
-                        .build(),
+                    specification.build(),
                 )
                 generateKeyPair()
             }

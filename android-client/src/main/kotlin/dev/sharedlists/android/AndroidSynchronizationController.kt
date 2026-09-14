@@ -93,6 +93,12 @@ class AndroidSynchronizationController(
             )
         } catch (exception: UnreadableAndroidDeviceKeyException) {
             presentation.copy(enrollment = EnrollmentState.UNREADABLE_DEVICE_KEY, status = "Android Keystore is unavailable. Retry without reset.")
+        } catch (exception: IllegalStateException) {
+            presentation.copy(
+                enrollment = EnrollmentState.UNENROLLED,
+                exportRequired = true,
+                status = "A device key already exists. Export its public key for enrollment.",
+            )
         }
         publish()
     }
@@ -143,6 +149,12 @@ class AndroidSynchronizationController(
         enrollment.delete()
         presentation = presentation.copy(enrollment = EnrollmentState.UNCONFIGURED, exportRequired = false, status = "Device setup reset.")
         publish()
+    }
+
+    fun retryDeviceKey() {
+        refreshEnrollment()
+        publish()
+        startIfEligible()
     }
 
     private fun cancelClient() {
@@ -233,8 +245,29 @@ class AndroidSynchronizationController(
 
     private fun publish() = observer(presentation)
 
+    private fun refreshEnrollment() {
+        presentation = try {
+            val signer = enrollment.current()
+            if (signer == null) {
+                presentation.copy(enrollment = EnrollmentState.UNCONFIGURED, exportRequired = false)
+            } else {
+                presentation.copy(
+                    enrollment = EnrollmentState.UNENROLLED,
+                    exportRequired = true,
+                    status = "Export this device public key for server enrollment.",
+                )
+            }
+        } catch (exception: UnreadableAndroidDeviceKeyException) {
+            presentation.copy(enrollment = EnrollmentState.UNREADABLE_DEVICE_KEY, exportRequired = false, status = "Android Keystore is unavailable.")
+        }
+    }
+
     private companion object {
         const val RETRY_DELAY_MILLIS = 5_000L
         val FINGERPRINT_PATTERN = Regex("^[0-9A-F]{64}$")
+    }
+
+    init {
+        refreshEnrollment()
     }
 }

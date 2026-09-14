@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Bundle
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -16,6 +17,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import dev.sharedlists.client.SharedList
+import dev.sharedlists.client.EnrollmentState
 
 class SharedListsActivity : Activity() {
     private lateinit var controller: AndroidSynchronizationController
@@ -61,12 +63,15 @@ class SharedListsActivity : Activity() {
                 addConfigurationForm()
             }
             when (presentation.enrollment) {
-                dev.sharedlists.client.EnrollmentState.UNCONFIGURED -> addButton("Create device key", controller::createDeviceKey)
-                dev.sharedlists.client.EnrollmentState.UNREADABLE_DEVICE_KEY -> addText("The device key could not be read. Retry after Android Keystore is available.")
+                EnrollmentState.UNCONFIGURED -> addButton("Create device key", controller::createDeviceKey)
+                EnrollmentState.UNREADABLE_DEVICE_KEY -> {
+                    addText("The device key could not be read. Retry after Android Keystore is available.")
+                    addButton("Retry device key", controller::retryDeviceKey)
+                }
                 else -> Unit
             }
             if (presentation.exportRequired) addButton("Export public key", ::sharePublicKey)
-            if (presentation.enrollment == dev.sharedlists.client.EnrollmentState.ENROLLED) {
+            if (presentation.enrollment == EnrollmentState.ENROLLED) {
                 addLists(presentation.canonicalState.lists)
                 addButton("Reset local synchronization data", controller::resetLocalData)
                 addButton("Reset device setup", controller::resetDeviceSetup)
@@ -76,7 +81,7 @@ class SharedListsActivity : Activity() {
 
     private fun addConfigurationForm() {
         val host = EditText(this).apply { hint = "Server IP address" }
-        val port = EditText(this).apply { hint = "Port"; inputType = android.text.InputType.TYPE_CLASS_NUMBER }
+        val port = EditText(this).apply { hint = "Port"; inputType = InputType.TYPE_CLASS_NUMBER }
         val fingerprint = EditText(this).apply { hint = "SHA-256 server fingerprint" }
         content.addView(host)
         content.addView(port)

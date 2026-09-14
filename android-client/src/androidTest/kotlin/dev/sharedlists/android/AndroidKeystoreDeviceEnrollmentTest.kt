@@ -11,6 +11,19 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class AndroidKeystoreDeviceEnrollmentTest {
     @Test
+    fun writesPublicKeyForStandaloneServerEnrollment() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val enrollment = AndroidKeystoreDeviceEnrollment(context)
+        val signer = enrollment.current() ?: enrollment.create()
+
+        context.openFileOutput("android-device-public-key.pem", 0).bufferedWriter().use { writer ->
+            writer.write(signer.publicKeyPem)
+        }
+
+        assertEquals(signer.keyFingerprint, enrollment.current()?.keyFingerprint)
+    }
+
+    @Test
     fun createsSignsExportsAndDeletesNonExportableP256Identity() {
         val enrollment = AndroidKeystoreDeviceEnrollment(InstrumentationRegistry.getInstrumentation().targetContext)
         enrollment.delete()

@@ -2,6 +2,7 @@ package dev.sharedlists.android
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
 import dev.sharedlists.client.CachedSharedListsClient
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
@@ -29,6 +30,7 @@ import dev.sharedlists.client.SetMarked
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -86,6 +88,7 @@ class AndroidSynchronizationController(
     private var observer: (AndroidClientPresentation) -> Unit = {}
     private var presentation = AndroidClientPresentation(configuration = configurationStore.load())
     private var retryJob: Job? = null
+    private var synchronizationJob: Job? = null
 
     fun configure(host: String, port: String, fingerprint: String): Boolean {
         val configuration = parseConfiguration(host, port, fingerprint) ?: return false
@@ -144,7 +147,7 @@ class AndroidSynchronizationController(
         val signer = requireNotNull(enrollment.current()) { "Create a device key before exporting it." }
         presentation = presentation.copy(exportRequired = false, status = "Public key ready to share with the administrator.")
         publish()
-        return "sharedlists-${android.os.Build.MODEL.replace(Regex("[^A-Za-z0-9._-]"), "-")}-${signer.keyFingerprint.take(12)}.pem" to signer.publicKeyPem
+        return "sharedlists-${Build.MODEL.replace(Regex("[^A-Za-z0-9._-]"), "-")}-${signer.keyFingerprint.take(12)}.pem" to signer.publicKeyPem
     }
 
     fun observe(observer: (AndroidClientPresentation) -> Unit) {
@@ -212,6 +215,8 @@ class AndroidSynchronizationController(
     }
 
     private fun cancelClient() {
+        synchronizationJob?.cancel()
+        synchronizationJob = null
         (client as? ForegroundSharedListsClient)?.cancelForegroundSynchronization()
         client = null
     }
@@ -250,11 +255,14 @@ class AndroidSynchronizationController(
             status = "Connecting…",
         )
         publish()
-        scope.launch {
+        synchronizationJob = scope.launch {
             try {
                 showState(nextClient.synchronize())
                 (nextClient as ObservableSharedListsClient).observeState(::showState)
+            } catch (exception: CancellationException) {
+                throw exception
             } catch (exception: Exception) {
+                if (client !== nextClient) return@launch
                 presentation = presentation.copy(editingEnabled = false, status = "Disconnected — retrying when available.")
                 publish()
                 if (foreground && networkAvailable) scheduleRetry()

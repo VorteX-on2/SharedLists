@@ -5,6 +5,7 @@ plugins {
 
 dependencies {
     implementation(project(":shared-client"))
+    testImplementation(kotlin("test"))
 }
 
 kotlin {
@@ -13,4 +14,8 @@ kotlin {
 
 application {
     mainClass = "dev.sharedlists.windows.MainKt"
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
 }

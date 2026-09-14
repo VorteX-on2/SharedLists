@@ -12,6 +12,8 @@ import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
 import java.io.File
 import javax.swing.BorderFactory
 import javax.swing.JButton
@@ -62,7 +64,9 @@ class WindowsClientFrame(
     private val renameListButton = JButton("Rename list")
     private val editItemButton = JButton("Edit item")
     private val retryDeviceKeyButton = JButton("Retry device key")
+    private val retrySynchronizationButton = JButton("Retry now")
     private val statusLabel = JLabel()
+    private val takeOverSynchronizationButton = JButton("Take over syncing")
     private val alphabeticalSortCheckBox = JCheckBox("Sort A–Z")
 
     init {
@@ -120,6 +124,8 @@ class WindowsClientFrame(
             ActionListener { controller.setAlphabeticalSort(alphabeticalSortCheckBox.isSelected) },
         )
         retryDeviceKeyButton.addActionListener(ActionListener { controller.retryDeviceKey() })
+        retrySynchronizationButton.addActionListener(ActionListener { controller.retryNow() })
+        takeOverSynchronizationButton.addActionListener(ActionListener { controller.takeOverSynchronization() })
         listView.addListSelectionListener { renderItems() }
         narrowCardView.addListSelectionListener { selectNarrowCard() }
         itemView.addListSelectionListener {
@@ -152,6 +158,21 @@ class WindowsClientFrame(
                 }
             },
         )
+        addWindowListener(
+            object : WindowAdapter() {
+                override fun windowClosing(event: WindowEvent) {
+                    controller.onBackground()
+                }
+
+                override fun windowDeiconified(event: WindowEvent) {
+                    controller.onForeground()
+                }
+
+                override fun windowIconified(event: WindowEvent) {
+                    controller.onBackground()
+                }
+            },
+        )
         pack()
         setLocationByPlatform(true)
     }
@@ -170,6 +191,8 @@ class WindowsClientFrame(
             add(exportDeviceKeyButton)
             add(resetDeviceButton)
             add(retryDeviceKeyButton)
+            add(retrySynchronizationButton)
+            add(takeOverSynchronizationButton)
             add(createListButton)
             add(createItemButton)
             add(renameListButton)
@@ -257,6 +280,8 @@ class WindowsClientFrame(
             exportDeviceKeyButton.isVisible = presentation.exportRequired
             resetDeviceButton.isVisible = !presentation.setupRequired && !presentation.unreadableDeviceKey
             retryDeviceKeyButton.isVisible = presentation.unreadableDeviceKey
+            retrySynchronizationButton.isVisible = presentation.retryAvailable
+            takeOverSynchronizationButton.isVisible = presentation.takeoverAvailable
             fingerprintField.isEnabled = !presentation.connectionActive
             hostField.isEnabled = !presentation.connectionActive
             portField.isEnabled = !presentation.connectionActive

@@ -1,17 +1,21 @@
 package dev.sharedlists.server
 
 import dev.sharedlists.protocol.AppliedThrough
+import dev.sharedlists.protocol.AppliedSnapshotBatch
 import dev.sharedlists.protocol.ClientOperation
 import dev.sharedlists.protocol.CreateList
 import dev.sharedlists.protocol.OpenSync
 import dev.sharedlists.protocol.SubmitOperation
+import dev.sharedlists.protocol.SynchronizationCursor
 import dev.sharedlists.protocol.SyncRequest
+import dev.sharedlists.protocol.ServerFaultReason
 import io.grpc.StatusRuntimeException
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.channels.Channel
@@ -23,6 +27,126 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 class SharedListsServiceTest {
+    @Test
+    fun `sends bounded snapshot batches only after their acknowledgement`() = runBlocking {
+        fixture().use { fixture ->
+            repeat(3) { index ->
+                fixture.store.submit(
+                    ClientOperation.newBuilder()
+                        .setOperationId("${index + 2}1111111-1111-4111-8111-111111111111")
+                        .setCreateList(
+                            CreateList.newBuilder()
+                                .setListId("${index + 5}1111111-1111-4111-8111-111111111111")
+                                .setName("List $index"),
+                        ).build(),
+                )
+            }
+            val requests = Channel<SyncRequest>()
+            val responses = SharedListsService(
+                ChallengeAuthenticator("test", emptyMap()),
+                fixture.store,
+                maximumBatchRecords = 2,
+            ).sync(requests.receiveAsFlow()).produceIn(this)
+            try {
+                requests.send(
+                    SyncRequest.newBuilder().setOpen(
+                        OpenSync.newBuilder().setSupportsBoundedTransfer(true),
+                    ).build(),
+                )
+                val first = withTimeout(5.seconds) { responses.receive() }.snapshotBatch
+                assertEquals(0, first.batchIndex)
+                assertEquals(2, first.listsCount)
+                assertFalse(first.isLast)
+
+                fixture.store.submit(
+                    ClientOperation.newBuilder()
+                        .setOperationId("81111111-1111-4111-8111-111111111111")
+                        .setCreateList(
+                            CreateList.newBuilder()
+                                .setListId("91111111-1111-4111-8111-111111111111")
+                                .setName("Concurrent"),
+                        ).build(),
+                )
+                requests.send(appliedSnapshotBatch(first.revision, first.batchIndex))
+                val second = withTimeout(5.seconds) { responses.receive() }.snapshotBatch
+                assertEquals(1, second.batchIndex)
+                assertEquals(1, second.listsCount)
+                assertTrue(second.isLast)
+
+                requests.send(appliedSnapshotBatch(second.revision, second.batchIndex))
+                val catchUp = withTimeout(5.seconds) { responses.receive() }.journalBatch
+                assertEquals(listOf(4L), catchUp.entriesList.map { it.revision })
+
+                requests.send(appliedThrough(4))
+                assertTrue(withTimeout(5.seconds) { responses.receive() }.hasLive())
+            } finally {
+                requests.close()
+                responses.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `sends bounded journal batches only after cumulative acknowledgement`() = runBlocking {
+        fixture().use { fixture ->
+            repeat(3) { index ->
+                fixture.store.submit(
+                    ClientOperation.newBuilder()
+                        .setOperationId("${index + 2}1111111-1111-4111-8111-111111111111")
+                        .setCreateList(
+                            CreateList.newBuilder()
+                                .setListId("${index + 5}1111111-1111-4111-8111-111111111111")
+                                .setName("List $index"),
+                        ).build(),
+                )
+            }
+            val snapshot = fixture.store.snapshot()
+            val requests = Channel<SyncRequest>()
+            val responses = SharedListsService(
+                ChallengeAuthenticator("test", emptyMap()),
+                fixture.store,
+                maximumBatchRecords = 2,
+            ).sync(requests.receiveAsFlow()).produceIn(this)
+            try {
+                requests.send(
+                    SyncRequest.newBuilder().setOpen(
+                        OpenSync.newBuilder().setCursor(
+                            SynchronizationCursor.newBuilder()
+                                .setGeneration(snapshot.generation)
+                                .setLastAppliedRevision(0),
+                        ),
+                    ).build(),
+                )
+                val first = withTimeout(5.seconds) { responses.receive() }.journalBatch
+                assertEquals(listOf(1L, 2L), first.entriesList.map { it.revision })
+
+                requests.send(appliedThrough(2))
+                val second = withTimeout(5.seconds) { responses.receive() }.journalBatch
+                assertEquals(listOf(3L), second.entriesList.map { it.revision })
+
+                requests.send(appliedThrough(3))
+                assertTrue(withTimeout(5.seconds) { responses.receive() }.hasLive())
+            } finally {
+                requests.close()
+                responses.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun `reports a stable server fault for unavailable storage`() = runBlocking {
+        fixture().use { fixture ->
+            fixture.store.close()
+            val responses = SharedListsService(ChallengeAuthenticator("test", emptyMap()), fixture.store).sync(
+                flow { emit(SyncRequest.newBuilder().setOpen(OpenSync.getDefaultInstance()).build()) },
+            ).toList()
+
+            assertEquals(1, responses.size)
+            assertTrue(responses.single().hasServerFault())
+            assertEquals(ServerFaultReason.SERVER_FAULT_REASON_STORAGE, responses.single().serverFault.reason)
+        }
+    }
+
     @Test
     fun `delivers an operation committed after a stream becomes live`() = runBlocking {
         fixture().use { fixture ->
@@ -125,6 +249,14 @@ class SharedListsServiceTest {
                     ),
             ),
         ).build()
+
+    private fun appliedSnapshotBatch(revision: Long, batchIndex: Int): SyncRequest =
+        SyncRequest.newBuilder().setAppliedSnapshotBatch(
+            AppliedSnapshotBatch.newBuilder().setRevision(revision).setBatchIndex(batchIndex),
+        ).build()
+
+    private fun appliedThrough(revision: Long): SyncRequest =
+        SyncRequest.newBuilder().setAppliedThrough(AppliedThrough.newBuilder().setRevision(revision)).build()
 }
 
 private class ServiceFixture : AutoCloseable {

@@ -1,6 +1,7 @@
 package dev.sharedlists.client
 
 import dev.sharedlists.protocol.AppliedThrough
+import dev.sharedlists.protocol.AppliedSnapshotBatch
 import dev.sharedlists.protocol.ChallengeRequest
 import dev.sharedlists.protocol.ClientOperation
 import dev.sharedlists.protocol.CreateItem as ProtoCreateItem
@@ -16,6 +17,7 @@ import dev.sharedlists.protocol.OperationOutcome as ProtoOperationOutcome
 import dev.sharedlists.protocol.RenameList as ProtoRenameList
 import dev.sharedlists.protocol.SetMarked as ProtoSetMarked
 import dev.sharedlists.protocol.SharedListsGrpcKt
+import dev.sharedlists.protocol.SnapshotBatch
 import dev.sharedlists.protocol.SubmitOperation
 import dev.sharedlists.protocol.SyncRequest
 import dev.sharedlists.protocol.SyncResponse
@@ -26,6 +28,9 @@ import io.grpc.ClientInterceptor
 import io.grpc.ForwardingClientCall
 import io.grpc.Metadata
 import io.grpc.MethodDescriptor
+import io.grpc.Status
+import io.grpc.StatusException
+import io.grpc.StatusRuntimeException
 import io.grpc.netty.GrpcSslContexts
 import io.grpc.netty.NettyChannelBuilder
 import io.netty.handler.ssl.util.SimpleTrustManagerFactory
@@ -37,6 +42,7 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import java.time.Instant
+import java.util.concurrent.TimeUnit
 import java.util.Base64
 import java.util.Properties
 import javax.net.ssl.ManagerFactoryParameters
@@ -157,7 +163,7 @@ class GrpcSharedListsClient(
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
-) : ObservableSharedListsClient, SharedListsClient {
+) : ForegroundSharedListsClient, ObservableSharedListsClient, SharedListsClient {
     private var activeSession: ActiveSession? = null
     private var cachedState = stateStore.loadCanonicalState()
     private var stateObserver: (ClientState.Ready) -> Unit = {}
@@ -167,6 +173,9 @@ class GrpcSharedListsClient(
         activeSession?.close()
         val channel = NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
             .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
+            .keepAliveTime(30, TimeUnit.SECONDS)
+            .keepAliveTimeout(10, TimeUnit.SECONDS)
+            .keepAliveWithoutCalls(true)
             .build()
         try {
             val unauthenticatedStub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
@@ -211,12 +220,21 @@ class GrpcSharedListsClient(
         activeSession?.let { observer(it.ready()) }
     }
 
+    override fun cancelForegroundSynchronization() {
+        activeSession?.cancel()
+        activeSession = null
+    }
+
     private inner class ActiveSession(
         private val channel: io.grpc.ManagedChannel,
         private val stub: SharedListsGrpcKt.SharedListsCoroutineStub,
         initialState: CanonicalState,
     ) {
         private var canonicalState = initialState
+        private var snapshotBatchIndex = 0
+        private var snapshotGeneration: String? = null
+        private var snapshotRevision: Long? = null
+        private val stagedSnapshotLists = mutableListOf<SharedList>()
         private var unconfirmedOperationId: String? = null
         private var unconfirmedOutcome: CompletableDeferred<DurableOperationOutcome>? = null
         private val requests = CoroutineChannel<SyncRequest>()
@@ -239,6 +257,7 @@ class GrpcSharedListsClient(
             requests.send(
                 SyncRequest.newBuilder().setOpen(
                     OpenSync.newBuilder().also { open ->
+                        open.supportsBoundedTransfer = true
                         cursor?.let {
                             open.cursorBuilder.setGeneration(it.generation).setLastAppliedRevision(it.lastAppliedRevision)
                         }
@@ -266,6 +285,12 @@ class GrpcSharedListsClient(
         suspend fun close() {
             requests.close()
             responseJob.cancelAndJoin()
+            channel.shutdownNow()
+        }
+
+        fun cancel() {
+            requests.cancel()
+            responseJob.cancel()
             channel.shutdownNow()
         }
 
@@ -302,9 +327,15 @@ class GrpcSharedListsClient(
                     ),
                 )
 
+                response.hasSnapshotBatch() -> acceptSnapshotBatch(response.snapshotBatch)
+
                 response.hasJournalBatch() -> {
                     if (!::cursor.isInitialized) {
-                        cursor = SynchronizationCursor(response.journalBatch.generation, 0)
+                        cursor = stateStore.loadCursor()
+                            ?.takeIf {
+                                stateStore.hasCanonicalState() && it.generation == response.journalBatch.generation
+                            }
+                            ?: SynchronizationCursor(response.journalBatch.generation, 0)
                     }
                     response.journalBatch.entriesList.forEach { entry -> apply(entry) }
                 }
@@ -315,8 +346,54 @@ class GrpcSharedListsClient(
                     }
                     live.complete(response.live)
                 }
+                response.hasServerFault() -> throw ServerFaultException(response.serverFault.reason.name)
                 else -> error("Server sent an unknown synchronization response.")
             }
+        }
+
+        private suspend fun acceptSnapshotBatch(batch: SnapshotBatch) {
+            if (snapshotGeneration == null) {
+                snapshotGeneration = batch.generation
+                snapshotRevision = batch.revision
+            }
+            check(
+                snapshotGeneration == batch.generation &&
+                    snapshotRevision == batch.revision &&
+                    snapshotBatchIndex == batch.batchIndex,
+            ) {
+                "Server snapshot batches must be contiguous and immutable."
+            }
+            stagedSnapshotLists += batch.listsList.map { list ->
+                SharedList(
+                    id = SharedListId.parse(list.id),
+                    items = list.itemsList.sortedBy { it.position }.map { item ->
+                        ListItem(ListItemId.parse(item.id), item.marked, item.text)
+                    },
+                    name = list.name,
+                )
+            }
+            if (batch.isLast) {
+                canonicalState = CanonicalState(stagedSnapshotLists.sortedBy { it.name.lowercase() })
+                cachedState = canonicalState
+                cursor = SynchronizationCursor(batch.generation, batch.revision)
+                stateStore.save(canonicalState, cursor)
+                requests.send(
+                    SyncRequest.newBuilder().setAppliedSnapshotBatch(
+                        AppliedSnapshotBatch.newBuilder()
+                            .setBatchIndex(batch.batchIndex)
+                            .setRevision(batch.revision),
+                    ).build(),
+                )
+                return
+            }
+            snapshotBatchIndex += 1
+            requests.send(
+                SyncRequest.newBuilder().setAppliedSnapshotBatch(
+                    AppliedSnapshotBatch.newBuilder()
+                        .setBatchIndex(batch.batchIndex)
+                        .setRevision(batch.revision),
+                ).build(),
+            )
         }
 
         private suspend fun acceptSnapshot(generation: String, revision: Long, state: CanonicalState) {
@@ -340,13 +417,17 @@ class GrpcSharedListsClient(
             val lists = canonicalState.lists.toMutableList()
             if (entry.outcome == ProtoOperationOutcome.OPERATION_OUTCOME_APPLIED) {
                 when (operation.operationCase) {
-                    ClientOperation.OperationCase.CREATE_LIST -> lists += SharedList(
-                        id = SharedListId.parse(operation.createList.listId),
-                        name = operation.createList.name,
-                    )
+                    ClientOperation.OperationCase.CREATE_LIST -> {
+                        if (lists.none { it.id.value == operation.createList.listId }) {
+                            lists += SharedList(
+                                id = SharedListId.parse(operation.createList.listId),
+                                name = operation.createList.name,
+                            )
+                        }
+                    }
                     ClientOperation.OperationCase.CREATE_ITEM -> {
                         val index = lists.indexOfFirst { it.id.value == operation.createItem.listId }
-                        if (index >= 0) {
+                        if (index >= 0 && lists[index].items.none { it.id.value == operation.createItem.itemId }) {
                             lists[index] = lists[index].copy(
                                 items = lists[index].items + ListItem(
                                     id = ListItemId.parse(operation.createItem.itemId),
@@ -448,7 +529,7 @@ class GrpcSharedListsClient(
             stateObserver(
                 ClientState.Ready(
                     enrollment = EnrollmentState.ENROLLED,
-                    connectivity = ConnectivityState.FAILED,
+                    connectivity = failureConnectivity(exception),
                     canonicalState = canonicalState,
                     cursor = if (::cursor.isInitialized) cursor else null,
                 ),
@@ -497,6 +578,28 @@ class GrpcSharedListsClient(
             }.build()
     }
 }
+
+private fun failureConnectivity(exception: Exception): ConnectivityState {
+    val status = when (exception) {
+        is StatusException -> exception.status
+        is StatusRuntimeException -> exception.status
+        else -> null
+    }
+    return when {
+        exception is ServerFaultException -> ConnectivityState.FATAL
+        status?.code == Status.Code.ABORTED && status.description == "session superseded" ->
+            ConnectivityState.SUPERSEDED
+        status?.code == Status.Code.DATA_LOSS ||
+            status?.code == Status.Code.INTERNAL ||
+            status?.code == Status.Code.FAILED_PRECONDITION ->
+            ConnectivityState.FATAL
+        else -> ConnectivityState.FAILED
+    }
+}
+
+private class ServerFaultException(
+    reason: String,
+) : IllegalStateException("Server fault: $reason")
 
 private fun ProtoOperationOutcome.toClientOutcome(): OperationOutcome =
     when (this) {

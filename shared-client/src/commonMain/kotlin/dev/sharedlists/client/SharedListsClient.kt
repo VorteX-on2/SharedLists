@@ -88,6 +88,8 @@ enum class ConnectivityState {
     SYNCHRONIZING,
     LIVE,
     FAILED,
+    FATAL,
+    SUPERSEDED,
 }
 
 sealed interface ClientState {
@@ -169,6 +171,10 @@ interface SharedListsClient {
     suspend fun synchronize(): ClientState
 
     suspend fun submit(command: EditCommand): ClientState
+}
+
+interface ForegroundSharedListsClient {
+    fun cancelForegroundSynchronization()
 }
 
 interface ObservableSharedListsClient {

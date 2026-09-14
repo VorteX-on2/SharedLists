@@ -29,10 +29,16 @@ message SynchronizationCursor {
 
 message OpenSync {
   optional SynchronizationCursor cursor = 1;
+  bool supports_bounded_transfer = 2;
 }
 
 message AppliedThrough {
   int64 revision = 1;
+}
+
+message AppliedSnapshotBatch {
+  int64 revision = 1;
+  int32 batch_index = 2;
 }
 
 message SubmitOperation {
@@ -44,6 +50,7 @@ message SyncRequest {
     OpenSync open = 1;
     AppliedThrough applied_through = 2;
     SubmitOperation submit_operation = 3;
+    AppliedSnapshotBatch applied_snapshot_batch = 4;
   }
 }
 
@@ -70,6 +77,15 @@ message Snapshot {
   int64 revision = 2;
   repeated SharedList lists = 3;
   repeated ListTombstone tombstones = 4;
+}
+
+message SnapshotBatch {
+  string generation = 1;
+  int64 revision = 2;
+  int32 batch_index = 3;
+  bool is_last = 4;
+  repeated SharedList lists = 5;
+  repeated ListTombstone tombstones = 6;
 }
 
 message CreateList {
@@ -158,11 +174,25 @@ message Live {
   int64 revision = 2;
 }
 
+enum ServerFaultReason {
+  SERVER_FAULT_REASON_UNSPECIFIED = 0;
+  SERVER_FAULT_REASON_STORAGE = 1;
+  SERVER_FAULT_REASON_SCHEMA = 2;
+  SERVER_FAULT_REASON_INTEGRITY = 3;
+  SERVER_FAULT_REASON_INTERNAL = 4;
+}
+
+message ServerFault {
+  ServerFaultReason reason = 1;
+}
+
 message SyncResponse {
   oneof message {
     EmptySnapshot empty_snapshot = 1;
     Live live = 2;
     Snapshot snapshot = 3;
     JournalBatch journal_batch = 4;
+    SnapshotBatch snapshot_batch = 5;
+    ServerFault server_fault = 6;
   }
 }

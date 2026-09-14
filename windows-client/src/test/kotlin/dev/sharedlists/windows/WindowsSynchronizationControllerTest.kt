@@ -7,6 +7,7 @@ import dev.sharedlists.client.CreateItem
 import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
+import dev.sharedlists.client.ForegroundSharedListsClient
 import dev.sharedlists.client.ListItem
 import dev.sharedlists.client.MoveItem
 import dev.sharedlists.client.ListItemId
@@ -121,6 +122,72 @@ class WindowsSynchronizationControllerTest {
         firstFacade.fail(IllegalStateException("older attempt"))
 
         assertEquals("Device enrolled and synchronized", controller.presentation().statusMessage)
+        assertTrue(controller.presentation().editingEnabled)
+    }
+
+    @Test
+    fun `backgrounding immediately cancels the foreground stream and keeps cached state read-only`() {
+        val facade = CancelableDeferredSharedListsClient()
+        val controller = controller(facade, InMemoryServerConfigurationStore())
+
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+        controller.onBackground()
+
+        assertTrue(facade.cancelled)
+        assertFalse(controller.presentation().connectionActive)
+        assertFalse(controller.presentation().editingEnabled)
+        assertEquals("Synchronization paused while the app is in the background", controller.presentation().statusMessage)
+    }
+
+    @Test
+    fun `recoverable foreground failure retries after five seconds`() {
+        val firstFacade = DeferredSharedListsClient()
+        val secondFacade = DeferredSharedListsClient()
+        val scheduler = CapturingRetryScheduler()
+        val controller = WindowsSynchronizationController(
+            clientFactory = SequentialWindowsClientFactory(firstFacade, secondFacade),
+            configurationStore = InMemoryServerConfigurationStore(),
+            retryScheduler = scheduler,
+            synchronizationRunner = SynchronizationRunner { block -> block() },
+        )
+
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+        firstFacade.fail(IllegalStateException("temporary transport failure"))
+
+        assertEquals(5_000L, scheduler.delayMillis)
+        scheduler.runScheduled()
+        secondFacade.complete(liveState(CanonicalState()))
+
+        assertTrue(controller.presentation().editingEnabled)
+    }
+
+    @Test
+    fun `superseded synchronization requires explicit takeover rather than periodic retry`() {
+        val firstFacade = DeferredSharedListsClient()
+        val secondFacade = DeferredSharedListsClient()
+        val scheduler = CapturingRetryScheduler()
+        val controller = WindowsSynchronizationController(
+            clientFactory = SequentialWindowsClientFactory(firstFacade, secondFacade),
+            configurationStore = InMemoryServerConfigurationStore(),
+            retryScheduler = scheduler,
+            synchronizationRunner = SynchronizationRunner { block -> block() },
+        )
+
+        controller.connect("192.0.2.10", "8443", FINGERPRINT)
+        firstFacade.complete(
+            ClientState.Ready(
+                enrollment = EnrollmentState.ENROLLED,
+                connectivity = ConnectivityState.SUPERSEDED,
+                canonicalState = CanonicalState(),
+                cursor = SynchronizationCursor("test-generation", 0),
+            ),
+        )
+
+        assertTrue(controller.presentation().takeoverAvailable)
+        assertNull(scheduler.delayMillis)
+        controller.takeOverSynchronization()
+        secondFacade.complete(liveState(CanonicalState()))
+
         assertTrue(controller.presentation().editingEnabled)
     }
 
@@ -317,7 +384,7 @@ class WindowsSynchronizationControllerTest {
             synchronizationRunner = SynchronizationRunner { block -> block() },
         )
 
-    private class DeferredSharedListsClient : SharedListsClient {
+    private open class DeferredSharedListsClient : SharedListsClient {
         private var continuation: Continuation<ClientState>? = null
 
         fun complete(state: ClientState) {
@@ -332,6 +399,28 @@ class WindowsSynchronizationControllerTest {
 
         override suspend fun synchronize(): ClientState =
             suspendCoroutine { continuation = it }
+    }
+
+    private class CancelableDeferredSharedListsClient : DeferredSharedListsClient(), ForegroundSharedListsClient {
+        var cancelled = false
+
+        override fun cancelForegroundSynchronization() {
+            cancelled = true
+        }
+    }
+
+    private class CapturingRetryScheduler : RetryScheduler {
+        var delayMillis: Long? = null
+        private var block: (() -> Unit)? = null
+
+        override fun schedule(delayMillis: Long, block: () -> Unit) {
+            this.delayMillis = delayMillis
+            this.block = block
+        }
+
+        fun runScheduled() {
+            requireNotNull(block).invoke()
+        }
     }
 
     private class CapturingSharedListsClient(

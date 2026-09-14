@@ -23,24 +23,26 @@ internal class SharedListsService(
                 request.hasOpen() && !opened -> {
                     opened = true
                     snapshot = store.snapshot()
-                    emit(
-                        SyncResponse.newBuilder().setEmptySnapshot(
-                            EmptySnapshot.newBuilder()
-                                .setGeneration(snapshot.generation)
-                                .setRevision(snapshot.revision),
-                        ).build(),
-                    )
+                    val cursor = request.open.cursor
+                    if (request.open.hasCursor() && cursor.generation == snapshot.generation &&
+                        cursor.lastAppliedRevision == snapshot.revision
+                    ) {
+                        emit(live(snapshot))
+                    } else {
+                        emit(
+                            SyncResponse.newBuilder().setEmptySnapshot(
+                                EmptySnapshot.newBuilder()
+                                    .setGeneration(snapshot.generation)
+                                    .setRevision(snapshot.revision)
+                                    .build(),
+                            ).build(),
+                        )
+                    }
                 }
 
                 request.hasAppliedThrough() && opened &&
                     request.appliedThrough.revision == snapshot?.revision -> {
-                    emit(
-                        SyncResponse.newBuilder().setLive(
-                            Live.newBuilder()
-                                .setGeneration(snapshot?.generation.orEmpty())
-                                .setRevision(snapshot?.revision ?: 0),
-                        ).build(),
-                    )
+                    emit(live(requireNotNull(snapshot)))
                 }
 
                 else -> throw Status.INVALID_ARGUMENT
@@ -57,6 +59,14 @@ internal class SharedListsService(
             throw Status.UNAUTHENTICATED.withDescription("authentication required").asRuntimeException()
         }
     }
+
+    private fun live(snapshot: CanonicalSnapshot): SyncResponse =
+        SyncResponse.newBuilder().setLive(
+            Live.newBuilder()
+                .setGeneration(snapshot.generation)
+                .setRevision(snapshot.revision)
+                .build(),
+        ).build()
 
     companion object {
         const val TEST_AUTHENTICATION_HEADER = "x-sharedlists-test-authentication"

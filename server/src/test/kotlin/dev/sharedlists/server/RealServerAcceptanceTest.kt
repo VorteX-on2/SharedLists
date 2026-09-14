@@ -11,6 +11,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -62,6 +63,7 @@ class RealServerAcceptanceTest {
 
 private class TemporaryServerInstallation : AutoCloseable {
     private val directory = Files.createTempDirectory("sharedlists-real-server-")
+    private val distribution = directory.resolve("server")
     private val port = ServerSocket(0).use { socket -> socket.localPort }
     private val processOutput = StringBuilder()
     private var process: Process? = null
@@ -71,6 +73,7 @@ private class TemporaryServerInstallation : AutoCloseable {
     val privateKeyFile: Path = directory.resolve("data/tls/server-key.pem")
 
     init {
+        copyDistribution()
         directory.resolve("data/authorized-devices").let(Files::createDirectories)
         directory.resolve("sharedlists.properties").writeText(
             """
@@ -108,7 +111,6 @@ private class TemporaryServerInstallation : AutoCloseable {
         synchronized(processOutput) {
             processOutput.setLength(0)
         }
-        val distribution = Path.of("build/install/server").toAbsolutePath()
         check(Files.isDirectory(distribution.resolve("lib"))) { "Server distribution is missing: $distribution" }
         process = ProcessBuilder(
             Path.of(System.getProperty("java.home"), "bin", "java.exe").toString(),
@@ -157,6 +159,21 @@ private class TemporaryServerInstallation : AutoCloseable {
             Thread.sleep(50)
         }
         error("Server did not become ready: ${output()}")
+    }
+
+    private fun copyDistribution() {
+        val source = Path.of("build/install/server").toAbsolutePath()
+        check(Files.isDirectory(source)) { "Server distribution is missing: $source" }
+        Files.walk(source).use { paths ->
+            paths.forEach { sourcePath ->
+                val target = distribution.resolve(source.relativize(sourcePath).toString())
+                if (Files.isDirectory(sourcePath)) {
+                    Files.createDirectories(target)
+                } else {
+                    Files.copy(sourcePath, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        }
     }
 
     private fun output(): String =

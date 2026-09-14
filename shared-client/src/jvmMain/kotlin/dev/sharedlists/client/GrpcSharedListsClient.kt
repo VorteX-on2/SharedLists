@@ -1,11 +1,11 @@
 package dev.sharedlists.client
 
 import dev.sharedlists.protocol.AppliedThrough
-import dev.sharedlists.protocol.EmptySnapshot
 import dev.sharedlists.protocol.Live
 import dev.sharedlists.protocol.OpenSync
 import dev.sharedlists.protocol.SharedListsGrpcKt
 import dev.sharedlists.protocol.SyncRequest
+import dev.sharedlists.protocol.SyncResponse
 import io.grpc.CallOptions
 import io.grpc.Channel
 import io.grpc.ClientCall
@@ -17,6 +17,9 @@ import io.grpc.netty.GrpcSslContexts
 import io.grpc.netty.NettyChannelBuilder
 import io.netty.handler.ssl.util.SimpleTrustManagerFactory
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
@@ -26,11 +29,11 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel as CoroutineChannel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 
 data class ServerEndpoint(
     val host: String,
@@ -61,12 +64,23 @@ class FileClientStateStore(
     }
 
     override fun save(cursor: SynchronizationCursor) {
-        file.parentFile.mkdirs()
-        Properties().also { properties ->
-            properties.setProperty("generation", cursor.generation)
-            properties.setProperty("lastAppliedRevision", cursor.lastAppliedRevision.toString())
-            file.outputStream().use { stream -> properties.store(stream, null) }
+        val parent = requireNotNull(file.parentFile) { "Client state file must have a parent directory." }
+        parent.mkdirs()
+        val temporaryFile = Files.createTempFile(parent.toPath(), "${file.name}.", ".tmp")
+        FileOutputStream(temporaryFile.toFile()).use { stream ->
+            Properties().also { properties ->
+                properties.setProperty("generation", cursor.generation)
+                properties.setProperty("lastAppliedRevision", cursor.lastAppliedRevision.toString())
+                properties.store(stream, null)
+            }
+            stream.fd.sync()
         }
+        Files.move(
+            temporaryFile,
+            file.toPath(),
+            StandardCopyOption.ATOMIC_MOVE,
+            StandardCopyOption.REPLACE_EXISTING,
+        )
     }
 }
 
@@ -83,11 +97,11 @@ class GrpcSharedListsClient(
             val stub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
                 .withInterceptors(FixtureAuthenticationInterceptor(preAuthenticatedForTest))
             val requests = CoroutineChannel<SyncRequest>()
-            val snapshot = CompletableDeferred<EmptySnapshot>()
+            val initialResponse = CompletableDeferred<SyncResponse>()
             val live = CompletableDeferred<Live>()
             val responseJob = launch {
                 stub.sync(requests.receiveAsFlow()).collect { response ->
-                    if (response.hasEmptySnapshot()) snapshot.complete(response.emptySnapshot)
+                    initialResponse.complete(response)
                     if (response.hasLive()) live.complete(response.live)
                 }
             }
@@ -102,15 +116,22 @@ class GrpcSharedListsClient(
                     }.build(),
                 ).build(),
             )
-            val receivedSnapshot = snapshot.await()
-            val cursor = SynchronizationCursor(receivedSnapshot.generation, receivedSnapshot.revision)
-            stateStore.save(cursor)
-            requests.send(
-                SyncRequest.newBuilder().setAppliedThrough(
-                    AppliedThrough.newBuilder().setRevision(receivedSnapshot.revision).build(),
-                ).build(),
-            )
-            val receivedLive = live.await()
+            val initial = initialResponse.await()
+            val (cursor, receivedLive) = if (initial.hasEmptySnapshot()) {
+                val receivedSnapshot = initial.emptySnapshot
+                val receivedCursor = SynchronizationCursor(receivedSnapshot.generation, receivedSnapshot.revision)
+                stateStore.save(receivedCursor)
+                requests.send(
+                    SyncRequest.newBuilder().setAppliedThrough(
+                        AppliedThrough.newBuilder().setRevision(receivedSnapshot.revision).build(),
+                    ).build(),
+                )
+                receivedCursor to live.await()
+            } else {
+                check(initial.hasLive()) { "Server did not provide synchronization state." }
+                val receivedLive = initial.live
+                SynchronizationCursor(receivedLive.generation, receivedLive.revision).also(stateStore::save) to receivedLive
+            }
             check(receivedLive.generation == cursor.generation && receivedLive.revision == cursor.lastAppliedRevision) {
                 "Server declared an inconsistent live cursor."
             }

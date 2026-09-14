@@ -23,7 +23,21 @@ application {
     mainClass = "dev.sharedlists.server.MainKt"
 }
 
+tasks.jar {
+    archiveFileName.set("sharedlists-server.jar")
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes["Main-Class"] = application.mainClass
+    }
+    from(
+        configurations.runtimeClasspath.get().map { dependency ->
+            if (dependency.isDirectory) dependency else zipTree(dependency)
+        },
+    )
+    exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
+}
+
 tasks.withType<Test>().configureEach {
-    dependsOn(tasks.installDist)
+    dependsOn(tasks.jar)
     useJUnitPlatform()
 }

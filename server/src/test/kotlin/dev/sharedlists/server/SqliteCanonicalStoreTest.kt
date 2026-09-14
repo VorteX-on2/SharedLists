@@ -155,7 +155,7 @@ class SqliteCanonicalStoreTest {
     }
 
     @Test
-    fun `upgrades an existing operation journal for marked outcomes`() {
+    fun `rejects an existing unsupported schema without modifying it`() {
         val directory = Files.createTempDirectory("sharedlists-store-upgrade-")
         val database = directory.resolve("sharedlists.db")
         try {
@@ -179,9 +179,7 @@ class SqliteCanonicalStoreTest {
                 }
             }
 
-            SqliteCanonicalStore(database).use { store ->
-                assertEquals(0, store.snapshot().revision)
-            }
+            assertFailsWith<IllegalArgumentException> { SqliteCanonicalStore(database) }
         } finally {
             directory.toFile().deleteRecursively()
         }

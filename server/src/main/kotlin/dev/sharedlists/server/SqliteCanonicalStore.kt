@@ -36,11 +36,18 @@ internal class SqliteCanonicalStore(
 
     init {
         Files.createDirectories(requireNotNull(databaseFile.parent))
+        val existingDatabase = Files.exists(databaseFile)
         connection = DriverManager.getConnection("jdbc:sqlite:${databaseFile.toAbsolutePath()}")
         connection.createStatement().use { statement ->
             statement.execute("PRAGMA foreign_keys = ON")
             statement.execute("PRAGMA journal_mode = DELETE")
             statement.execute("PRAGMA synchronous = FULL")
+            if (existingDatabase) {
+                require(statement.executeQuery("PRAGMA quick_check").use { result -> result.next() && result.getString(1) == "ok" }) {
+                    "SQLite integrity check failed."
+                }
+                require(isSupportedSchema(statement)) { "SQLite schema is unsupported; restore a matching whole-installation backup." }
+            }
             statement.execute(
                 """
                 CREATE TABLE IF NOT EXISTS synchronization_metadata (
@@ -105,19 +112,6 @@ internal class SqliteCanonicalStore(
                 )
                 """.trimIndent(),
             )
-            if (!operationJournalColumns().contains("marked_value")) {
-                statement.execute("ALTER TABLE operation_journal ADD COLUMN marked_value INTEGER NOT NULL DEFAULT 0")
-            }
-            val operationJournalColumns = operationJournalColumns()
-            if ("marked_value" !in operationJournalColumns) {
-                statement.execute("ALTER TABLE operation_journal ADD COLUMN marked_value INTEGER NOT NULL DEFAULT 0")
-            }
-            if ("predecessor_item_id" !in operationJournalColumns) {
-                statement.execute("ALTER TABLE operation_journal ADD COLUMN predecessor_item_id TEXT NOT NULL DEFAULT ''")
-            }
-            if ("successor_item_id" !in operationJournalColumns) {
-                statement.execute("ALTER TABLE operation_journal ADD COLUMN successor_item_id TEXT NOT NULL DEFAULT ''")
-            }
         }
 
         connection.prepareStatement(
@@ -249,6 +243,36 @@ internal class SqliteCanonicalStore(
             connection.close()
         }
     }
+
+    private fun isSupportedSchema(statement: Statement): Boolean {
+        val expectedTables = setOf(
+            "synchronization_metadata",
+            "list_items",
+            "item_tombstones",
+            "shared_lists",
+            "list_tombstones",
+            "operation_journal",
+        )
+        val actualTables = statement.executeQuery(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        ).use { result ->
+            buildSet {
+                while (result.next()) add(result.getString(1))
+            }
+        }
+        return actualTables == expectedTables &&
+            columns(statement, "operation_journal") == setOf(
+                "revision", "operation_id", "request_fingerprint", "operation_type", "list_id", "list_name",
+                "item_id", "item_text", "marked_value", "predecessor_item_id", "successor_item_id", "outcome",
+            )
+    }
+
+    private fun columns(statement: Statement, table: String): Set<String> =
+        statement.executeQuery("PRAGMA table_info($table)").use { result ->
+            buildSet {
+                while (result.next()) add(result.getString("name"))
+            }
+        }
 
     private fun existing(operation: ClientOperation): JournalEntry? =
         connection.prepareStatement(

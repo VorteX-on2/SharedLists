@@ -163,11 +163,13 @@ internal class AuthenticationInterceptor(
             object : ForwardingServerCallListener.SimpleForwardingServerCallListener<RequestT>(listener) {
                 override fun onCancel() {
                     streams.unregister(fingerprint, call)
+                    println("SESSION terminated: client cancelled")
                     super.onCancel()
                 }
 
                 override fun onComplete() {
                     streams.unregister(fingerprint, call)
+                    println("SESSION terminated: completed")
                     super.onComplete()
                 }
             }

@@ -442,6 +442,17 @@ class GrpcSharedListsClient(
         private fun fail(exception: Exception) {
             live.completeExceptionally(exception)
             unconfirmedOutcome?.completeExceptionally(exception)
+            activeSession = null
+            requests.close()
+            channel.shutdownNow()
+            stateObserver(
+                ClientState.Ready(
+                    enrollment = EnrollmentState.ENROLLED,
+                    connectivity = ConnectivityState.FAILED,
+                    canonicalState = canonicalState,
+                    cursor = if (::cursor.isInitialized) cursor else null,
+                ),
+            )
         }
 
         private fun EditCommand.toProto(): ClientOperation =

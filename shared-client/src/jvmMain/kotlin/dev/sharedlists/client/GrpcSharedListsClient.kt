@@ -37,6 +37,7 @@ import java.util.Properties
 import javax.net.ssl.ManagerFactoryParameters
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +55,8 @@ data class ServerEndpoint(
 )
 
 interface ClientStateStore {
+    fun hasCanonicalState(): Boolean = false
+
     fun loadCursor(): SynchronizationCursor?
 
     fun loadCanonicalState(): CanonicalState = CanonicalState()
@@ -68,6 +71,10 @@ interface ClientStateStore {
 class FileClientStateStore(
     private val file: File,
 ) : ClientStateStore {
+    override fun hasCanonicalState(): Boolean =
+        file.exists() && Properties().also { properties -> file.inputStream().use(properties::load) }
+            .containsKey("list.count")
+
     override fun loadCursor(): SynchronizationCursor? {
         if (!file.exists()) {
             return null
@@ -162,7 +169,7 @@ class GrpcSharedListsClient(
                 cachedState,
             )
             activeSession = session
-            session.open(stateStore.loadCursor())
+            session.open(stateStore.loadCursor()?.takeIf { stateStore.hasCanonicalState() })
             val live = session.live.await()
             check(live.generation == session.cursor.generation && live.revision == session.cursor.lastAppliedRevision) {
                 "Server declared an inconsistent live cursor."
@@ -190,7 +197,14 @@ class GrpcSharedListsClient(
         private var unconfirmedOutcome: CompletableDeferred<DurableOperationOutcome>? = null
         private val requests = CoroutineChannel<SyncRequest>()
         private val responseJob = scope.launch {
-            stub.sync(requests.receiveAsFlow()).collect(::receive)
+            try {
+                stub.sync(requests.receiveAsFlow()).collect(::receive)
+            } catch (exception: CancellationException) {
+                fail(exception)
+                throw exception
+            } catch (exception: Exception) {
+                fail(exception)
+            }
         }
 
         lateinit var cursor: SynchronizationCursor
@@ -311,6 +325,11 @@ class GrpcSharedListsClient(
                     AppliedThrough.newBuilder().setRevision(cursor.lastAppliedRevision).build(),
                 ).build(),
             )
+        }
+
+        private fun fail(exception: Exception) {
+            live.completeExceptionally(exception)
+            unconfirmedOutcome?.completeExceptionally(exception)
         }
 
         private fun EditCommand.toProto(): ClientOperation =

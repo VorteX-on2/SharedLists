@@ -13,11 +13,51 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.produceIn
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 class SharedListsServiceTest {
+    @Test
+    fun `delivers an operation committed after a stream becomes live`() = runBlocking {
+        fixture().use { fixture ->
+            val requests = Channel<SyncRequest>()
+            val responses = SharedListsService(ChallengeAuthenticator("test", emptyMap()), fixture.store)
+                .sync(requests.receiveAsFlow())
+                .produceIn(this)
+            try {
+                requests.send(SyncRequest.newBuilder().setOpen(OpenSync.getDefaultInstance()).build())
+                withTimeout(5.seconds) { responses.receive() }
+                requests.send(SyncRequest.newBuilder().setAppliedThrough(AppliedThrough.newBuilder().setRevision(0)).build())
+                withTimeout(5.seconds) { responses.receive() }
+
+                fixture.store.submit(
+                    ClientOperation.newBuilder()
+                        .setOperationId("21111111-1111-4111-8111-111111111111")
+                        .setCreateList(
+                            CreateList.newBuilder()
+                                .setListId("11111111-1111-4111-8111-111111111111")
+                                .setName("Groceries"),
+                        )
+                        .build(),
+                )
+
+                assertEquals(
+                    1,
+                    withTimeout(5.seconds) { responses.receive() }.journalBatch.entriesList.single().revision,
+                )
+            } finally {
+                requests.close()
+                responses.cancel()
+            }
+        }
+    }
+
     @Test
     fun `rejects another submission until the previous journal entry is acknowledged`() {
         fixture().use { fixture ->

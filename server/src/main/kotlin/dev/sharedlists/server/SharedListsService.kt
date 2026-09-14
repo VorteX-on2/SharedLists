@@ -11,6 +11,7 @@ import dev.sharedlists.protocol.Snapshot
 import dev.sharedlists.protocol.SyncRequest
 import dev.sharedlists.protocol.SyncResponse
 import io.grpc.Status
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
@@ -35,7 +36,7 @@ internal class SharedListsService(
         var synchronizedRevision = -1L
         var lastDeliveredRevision = -1L
         val events = Channel<Event>(Channel.UNLIMITED)
-        val journalJob = launch {
+        val journalJob = launch(start = CoroutineStart.UNDISPATCHED) {
             store.journalEntries.collect { events.send(Event.Journal(it)) }
         }
         val requestJob = launch {

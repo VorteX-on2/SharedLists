@@ -1,0 +1,3 @@
+# Authenticate streams with challenge-bound JWTs
+
+Shared Lists authenticates each foreground gRPC stream with one ES256 JWT signed by the device's non-exportable P-256 key and bound to a single-use, 60-second server challenge. The server identifies the enrollment by the full public-key fingerprint, verifies only against its startup-loaded PEM allowlist, pins the token type, algorithm, issuer, subject, and audience, and consumes the challenge atomically; this adds one handshake round trip but prevents a captured JWT from opening another stream without requiring per-operation signatures or mid-stream renewal.

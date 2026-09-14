@@ -1,0 +1,3 @@
+# Use a server-ordered idempotent operation log
+
+Shared Lists converges through one server-authoritative, append-only operation log rather than a peer-mergeable CRDT or device timestamps. Clients submit one field-specific operation with a UUIDv4 ID at a time only while live synchronization is established, the server records each canonical payload and outcome at most once in revision order, deletion remains terminal through retained tombstones, and reorders express a move relative to neighboring items; the same durable log resolves an unconfirmed operation after reconnect and supports incremental synchronization, while current-state tables keep reads simple.

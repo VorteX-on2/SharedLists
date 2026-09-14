@@ -35,6 +35,7 @@ import kotlin.io.path.inputStream
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
@@ -197,6 +198,16 @@ class RealServerAcceptanceTest {
                         ),
                     ).lastOperationOutcome?.outcome,
                 )
+                assertFailsWith<Exception> {
+                    first.submitBlocking(
+                        CreateItem(
+                            itemId = ListItemId.parse("f3111111-1111-4111-8111-111111111111"),
+                            listId = listId,
+                            operationId = OperationId.parse("a1111111-1111-4111-8111-111111111111"),
+                            text = "Mismatch",
+                        ),
+                    )
+                }
                 fixture.restart()
                 assertEquals(
                     listOf("Milk"),

@@ -38,6 +38,13 @@ interface WindowsClientFactory {
     fun create(configuration: ServerConfiguration): SharedListsClient
 }
 
+data class WindowsListRow(
+    val id: SharedListId,
+    val name: String,
+) {
+    override fun toString(): String = name
+}
+
 interface WindowsDeviceSignerProvider {
     fun load(): DeviceSigner
 }
@@ -118,6 +125,7 @@ data class WindowsClientPresentation(
     val emptyStateMessage: String?,
     val exportRequired: Boolean = false,
     val lists: List<String>,
+    val sharedLists: List<WindowsListRow> = emptyList(),
     val statusMessage: String?,
     val setupRequired: Boolean,
     val unreadableDeviceKey: Boolean,
@@ -222,6 +230,7 @@ class WindowsSynchronizationController(
                 editability = Editability.READ_ONLY,
                 emptyStateMessage = if (cachedState.lists.isEmpty()) "Connecting to synchronized lists…" else null,
                 lists = cachedState.lists.map { list -> list.name },
+                sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
                 statusMessage = "Connecting…",
             ),
         )
@@ -254,12 +263,19 @@ class WindowsSynchronizationController(
         submit(name) { operationId -> CreateList(operationId, newListId(), name) }
     }
 
-    fun createItem(listName: String, text: String) {
-        val list = cachedState.lists.firstOrNull { it.name == listName } ?: return
+    fun createItem(listId: SharedListId, text: String) {
+        val list = cachedState.lists.firstOrNull { it.id == listId } ?: return
         if (list.items.any { it.text == text.trim() }) {
             update(presentation.copy(statusMessage = "A matching item already exists; saving duplicate…"))
         }
-        submit(text, ITEM_TEXT_LIMIT) { operationId -> CreateItem(operationId, newItemId(), list.id, text) }
+        submit(text, ITEM_TEXT_LIMIT) { operationId ->
+            CreateItem(
+                itemId = newItemId(),
+                listId = list.id,
+                operationId = operationId,
+                text = text,
+            )
+        }
     }
 
     fun deleteList(name: String) {
@@ -267,23 +283,23 @@ class WindowsSynchronizationController(
         submit(null) { operationId -> DeleteList(operationId, list.id) }
     }
 
-    fun deleteItem(listName: String, itemId: ListItemId) {
-        val list = cachedState.lists.firstOrNull { it.name == listName } ?: return
+    fun deleteItem(listId: SharedListId, itemId: ListItemId) {
+        val list = cachedState.lists.firstOrNull { it.id == listId } ?: return
         if (list.items.none { it.id == itemId }) {
             return
         }
-        submit(null) { operationId -> DeleteItem(operationId, itemId, list.id) }
+        submit(null) { operationId -> DeleteItem(itemId, list.id, operationId) }
     }
 
-    fun editItemText(listName: String, itemId: ListItemId, newText: String) {
-        val list = cachedState.lists.firstOrNull { it.name == listName } ?: return
+    fun editItemText(listId: SharedListId, itemId: ListItemId, newText: String) {
+        val list = cachedState.lists.firstOrNull { it.id == listId } ?: return
         if (list.items.none { it.id == itemId }) {
             return
         }
-        submit(newText, ITEM_TEXT_LIMIT) { operationId -> EditItemText(operationId, itemId, list.id, newText) }
+        submit(newText, ITEM_TEXT_LIMIT) { operationId -> EditItemText(itemId, list.id, operationId, newText) }
     }
 
-    fun items(listName: String) = cachedState.lists.firstOrNull { it.name == listName }?.items.orEmpty()
+    fun items(listId: SharedListId) = cachedState.lists.firstOrNull { it.id == listId }?.items.orEmpty()
 
     fun observePresentation(observer: (WindowsClientPresentation) -> Unit) {
         stateChanged = observer
@@ -388,6 +404,7 @@ class WindowsSynchronizationController(
                 editability = Editability.READ_ONLY,
                 emptyStateMessage = if (cachedState.lists.isEmpty()) "Unable to synchronize shared lists." else null,
                 lists = cachedState.lists.map { list -> list.name },
+                sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
                 statusMessage = "Disconnected — retry when the server is available",
             ),
         )
@@ -400,6 +417,7 @@ class WindowsSynchronizationController(
                 editability = Editability.READ_ONLY,
                 emptyStateMessage = failureMessage(enrollment),
                 lists = cachedState.lists.map { list -> list.name },
+                sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
                 statusMessage = "Synchronization unavailable",
             ),
         )
@@ -414,6 +432,7 @@ class WindowsSynchronizationController(
                 editability = if (isLive) Editability.LIVE else Editability.READ_ONLY,
                 emptyStateMessage = emptyStateMessage(clientState, isLive),
                 lists = cachedState.lists.map { list -> list.name },
+                sharedLists = cachedState.lists.map { list -> WindowsListRow(list.id, list.name) },
                 statusMessage = statusMessage(clientState, isLive),
             ),
         )

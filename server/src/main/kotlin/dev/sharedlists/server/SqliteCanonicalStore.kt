@@ -434,10 +434,16 @@ internal class SqliteCanonicalStore(
                     statement.executeUpdate()
                 }
                 connection.prepareStatement(
-                    "UPDATE list_items SET position = position - 1 WHERE list_id = ? AND position > ?",
+                    "UPDATE list_items SET position = position + 1000000 WHERE list_id = ? AND position > ?",
                 ).use { statement ->
                     statement.setString(1, operation.listId)
                     statement.setInt(2, position)
+                    statement.executeUpdate()
+                }
+                connection.prepareStatement(
+                    "UPDATE list_items SET position = position - 1000001 WHERE list_id = ? AND position > 1000000",
+                ).use { statement ->
+                    statement.setString(1, operation.listId)
                     statement.executeUpdate()
                 }
                 connection.prepareStatement(
@@ -544,11 +550,11 @@ internal class SqliteCanonicalStore(
 
     private enum class Type {
         CREATE,
-        RENAME,
         DELETE,
         CREATE_ITEM,
+        DELETE_ITEM,
         EDIT_ITEM_TEXT,
-        DELETE_ITEM;
+        RENAME;
 
         companion object {
             fun fromNumber(number: Int): Type = entries[number]
@@ -590,8 +596,8 @@ internal class SqliteCanonicalStore(
     )
 
     private companion object {
-        const val MAXIMUM_NAME_CODE_POINTS = 100
         const val MAXIMUM_ITEM_TEXT_CODE_POINTS = 500
+        const val MAXIMUM_NAME_CODE_POINTS = 100
 
         fun fold(value: String): String =
             value.uppercase(Locale.ROOT)

@@ -33,9 +33,10 @@ class WindowsClientFrame(
     private val fingerprintField = JTextField(64)
     private val hostField = JTextField(18)
     private val exportDeviceKeyButton = JButton("Export public key")
-    private val listModel = DefaultListModel<String>()
+    private val listModel = DefaultListModel<WindowsListRow>()
     private val listView = JList(listModel)
     private val itemModel = DefaultListModel<WindowsItemRow>()
+    private val itemTextField = JTextField()
     private val itemView = JList(itemModel)
     private val portField = JTextField(5)
     private val resetDeviceButton = JButton("Reset device setup")
@@ -91,6 +92,7 @@ class WindowsClientFrame(
         renameListButton.addActionListener(ActionListener { renameSelectedList() })
         retryDeviceKeyButton.addActionListener(ActionListener { controller.retryDeviceKey() })
         listView.addListSelectionListener { renderItems() }
+        itemView.addListSelectionListener { itemTextField.text = itemView.selectedValue?.text.orEmpty() }
         controller.observePresentation(::render)
         pack()
         setLocationByPlatform(true)
@@ -136,7 +138,10 @@ class WindowsClientFrame(
                     BorderLayout.CENTER,
                 )
             }, BorderLayout.CENTER)
-            add(emptyStateLabel, BorderLayout.SOUTH)
+            add(JPanel(BorderLayout(0, 6)).apply {
+                add(itemTextField, BorderLayout.NORTH)
+                add(emptyStateLabel, BorderLayout.SOUTH)
+            }, BorderLayout.SOUTH)
         }
 
     private fun render(presentation: WindowsClientPresentation) {
@@ -148,7 +153,7 @@ class WindowsClientFrame(
                 fingerprintField.text = configuration.certificateFingerprint
             }
             listModel.clear()
-            presentation.lists.forEach(listModel::addElement)
+            presentation.sharedLists.forEach(listModel::addElement)
             renderItems()
             emptyStateLabel.text = presentation.emptyStateMessage.orEmpty()
             statusLabel.text = presentation.statusMessage.orEmpty()
@@ -159,6 +164,7 @@ class WindowsClientFrame(
             deleteListButton.isEnabled = presentation.editingEnabled && listView.selectedValue != null
             editItemButton.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
             deleteItemButton.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
+            itemTextField.isEnabled = presentation.editingEnabled && itemView.selectedValue != null
             createDeviceKeyButton.isVisible = presentation.setupRequired
             exportDeviceKeyButton.isVisible = presentation.exportRequired
             resetDeviceButton.isVisible = !presentation.setupRequired && !presentation.unreadableDeviceKey
@@ -194,48 +200,48 @@ class WindowsClientFrame(
     }
 
     private fun createItem() {
-        val listName = listView.selectedValue ?: return
+        val list = listView.selectedValue ?: return
         val text = JOptionPane.showInputDialog(this, "Item text", "Add item", JOptionPane.PLAIN_MESSAGE) ?: return
-        controller.createItem(listName, text)
+        controller.createItem(list.id, text)
     }
 
     private fun deleteSelectedList() {
-        val name = listView.selectedValue ?: return
+        val list = listView.selectedValue ?: return
         if (
             JOptionPane.showConfirmDialog(
                 this,
-                "Delete \"$name\" permanently?",
+                "Delete \"${list.name}\" permanently?",
                 "Delete shared list",
                 JOptionPane.OK_CANCEL_OPTION,
             ) == JOptionPane.OK_OPTION
         ) {
-            controller.deleteList(name)
+            controller.deleteList(list.name)
         }
     }
 
     private fun deleteSelectedItem() {
-        val listName = listView.selectedValue ?: return
+        val list = listView.selectedValue ?: return
         val item = itemView.selectedValue ?: return
-        controller.deleteItem(listName, item.id)
+        controller.deleteItem(list.id, item.id)
     }
 
     private fun editSelectedItem() {
-        val listName = listView.selectedValue ?: return
+        val list = listView.selectedValue ?: return
         val item = itemView.selectedValue ?: return
-        val text = JOptionPane.showInputDialog(this, "Item text", item.text) ?: return
-        controller.editItemText(listName, item.id, text)
+        controller.editItemText(list.id, item.id, itemTextField.text)
     }
 
     private fun renameSelectedList() {
-        val currentName = listView.selectedValue ?: return
+        val currentName = listView.selectedValue?.name ?: return
         val name = JOptionPane.showInputDialog(this, "List name", currentName) ?: return
         controller.renameList(currentName, name)
     }
 
     private fun renderItems() {
         itemModel.clear()
-        listView.selectedValue?.let { listName ->
-            controller.items(listName).forEach { item ->
+        itemTextField.text = ""
+        listView.selectedValue?.let { list ->
+            controller.items(list.id).forEach { item ->
                 itemModel.addElement(WindowsItemRow(item.id, item.text))
             }
         }

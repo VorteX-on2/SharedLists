@@ -48,9 +48,14 @@ data class CanonicalState(
 
 data class SharedList(
     val id: SharedListId,
-    val name: String,
     val items: List<ListItem> = emptyList(),
-)
+    val name: String,
+) {
+    constructor(
+        id: SharedListId,
+        name: String,
+    ) : this(id, emptyList(), name)
+}
 
 data class ListItem(
     val id: ListItemId,
@@ -126,22 +131,22 @@ data class RenameList(
 ) : EditCommand
 
 data class CreateItem(
-    override val operationId: OperationId,
     val itemId: ListItemId,
     val listId: SharedListId,
+    override val operationId: OperationId,
     val text: String,
 ) : EditCommand
 
 data class DeleteItem(
-    override val operationId: OperationId,
     val itemId: ListItemId,
     val listId: SharedListId,
+    override val operationId: OperationId,
 ) : EditCommand
 
 data class EditItemText(
-    override val operationId: OperationId,
     val itemId: ListItemId,
     val listId: SharedListId,
+    override val operationId: OperationId,
     val text: String,
 ) : EditCommand
 

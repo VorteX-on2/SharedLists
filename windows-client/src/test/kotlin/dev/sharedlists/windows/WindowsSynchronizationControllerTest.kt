@@ -164,15 +164,15 @@ class WindowsSynchronizationControllerTest {
         val controller = controller(facade, InMemoryServerConfigurationStore())
 
         controller.connect("192.0.2.10", "8443", FINGERPRINT)
-        controller.createItem("Groceries", "x".repeat(501))
+        controller.createItem(list.id, "x".repeat(501))
 
         assertEquals("Enter item text of at most 500 characters.", controller.presentation().statusMessage)
         assertTrue(facade.commands.isEmpty())
 
-        controller.createItem("Groceries", "Milk")
+        controller.createItem(list.id, "Milk")
 
         assertTrue(facade.commands.single() is CreateItem)
-        assertEquals(listOf("Milk"), controller.items("Groceries").map { it.text })
+        assertEquals(listOf("Milk"), controller.items(list.id).map { it.text })
     }
 
     private fun liveState(canonicalState: CanonicalState): ClientState.Ready =

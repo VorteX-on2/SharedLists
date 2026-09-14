@@ -23,14 +23,18 @@ class WindowsClientFrame(
     private val controller: WindowsSynchronizationController,
 ) : JFrame("Shared Lists") {
     private val connectButton = JButton("Connect")
+    private val createListButton = JButton("Create list")
     private val createDeviceKeyButton = JButton("Set up device")
+    private val deleteListButton = JButton("Delete list")
     private val emptyStateLabel = JLabel()
     private val fingerprintField = JTextField(64)
     private val hostField = JTextField(18)
     private val exportDeviceKeyButton = JButton("Export public key")
     private val listModel = DefaultListModel<String>()
+    private val listView = JList(listModel)
     private val portField = JTextField(5)
     private val resetDeviceButton = JButton("Reset device setup")
+    private val renameListButton = JButton("Rename list")
     private val retryDeviceKeyButton = JButton("Retry device key")
     private val statusLabel = JLabel()
 
@@ -44,6 +48,7 @@ class WindowsClientFrame(
                 controller.connect(hostField.text, portField.text, fingerprintField.text)
             },
         )
+        createListButton.addActionListener(ActionListener { createList() })
         createDeviceKeyButton.addActionListener(
             ActionListener {
                 if (
@@ -73,6 +78,8 @@ class WindowsClientFrame(
             },
         )
         exportDeviceKeyButton.addActionListener(ActionListener { exportPublicKey() })
+        deleteListButton.addActionListener(ActionListener { deleteSelectedList() })
+        renameListButton.addActionListener(ActionListener { renameSelectedList() })
         retryDeviceKeyButton.addActionListener(ActionListener { controller.retryDeviceKey() })
         controller.observePresentation(::render)
         pack()
@@ -93,6 +100,9 @@ class WindowsClientFrame(
             add(exportDeviceKeyButton)
             add(resetDeviceButton)
             add(retryDeviceKeyButton)
+            add(createListButton)
+            add(renameListButton)
+            add(deleteListButton)
         }
 
     private fun contentPanel(): JPanel =
@@ -101,10 +111,7 @@ class WindowsClientFrame(
             add(statusLabel, BorderLayout.NORTH)
             add(
                 JScrollPane(
-                    JList(listModel).apply {
-                        selectionMode = ListSelectionModel.SINGLE_SELECTION
-                        isEnabled = false
-                    },
+                    listView.apply { selectionMode = ListSelectionModel.SINGLE_SELECTION },
                 ),
                 BorderLayout.CENTER,
             )
@@ -124,6 +131,9 @@ class WindowsClientFrame(
             emptyStateLabel.text = presentation.emptyStateMessage.orEmpty()
             statusLabel.text = presentation.statusMessage.orEmpty()
             connectButton.isEnabled = !presentation.connectionActive
+            createListButton.isEnabled = presentation.editingEnabled
+            renameListButton.isEnabled = presentation.editingEnabled && listView.selectedValue != null
+            deleteListButton.isEnabled = presentation.editingEnabled && listView.selectedValue != null
             createDeviceKeyButton.isVisible = presentation.setupRequired
             exportDeviceKeyButton.isVisible = presentation.exportRequired
             resetDeviceButton.isVisible = !presentation.setupRequired && !presentation.unreadableDeviceKey
@@ -150,5 +160,31 @@ class WindowsClientFrame(
         if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
             controller.exportDevicePublicKey(chooser.selectedFile)
         }
+    }
+
+    private fun createList() {
+        val name = JOptionPane.showInputDialog(this, "List name", "Create shared list", JOptionPane.PLAIN_MESSAGE)
+            ?: return
+        controller.createList(name)
+    }
+
+    private fun deleteSelectedList() {
+        val name = listView.selectedValue ?: return
+        if (
+            JOptionPane.showConfirmDialog(
+                this,
+                "Delete \"$name\" permanently?",
+                "Delete shared list",
+                JOptionPane.OK_CANCEL_OPTION,
+            ) == JOptionPane.OK_OPTION
+        ) {
+            controller.deleteList(name)
+        }
+    }
+
+    private fun renameSelectedList() {
+        val currentName = listView.selectedValue ?: return
+        val name = JOptionPane.showInputDialog(this, "List name", currentName) ?: return
+        controller.renameList(currentName, name)
     }
 }

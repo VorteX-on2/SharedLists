@@ -3,15 +3,22 @@ package dev.sharedlists.windows
 import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
+import dev.sharedlists.client.CreateList
+import dev.sharedlists.client.DeleteList
 import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
 import dev.sharedlists.client.FileClientStateStore
 import dev.sharedlists.client.GrpcSharedListsClient
+import dev.sharedlists.client.OperationId
+import dev.sharedlists.client.OperationOutcome
+import dev.sharedlists.client.RenameList
 import dev.sharedlists.client.ServerEndpoint
 import dev.sharedlists.client.SharedListsClient
+import dev.sharedlists.client.SharedListId
 import java.io.File
 import java.io.IOException
+import java.util.UUID
 import java.util.prefs.Preferences
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.EmptyCoroutineContext
@@ -129,6 +136,7 @@ class WindowsSynchronizationController(
     private var cachedState = CanonicalState()
     private var connectionAttempt = 0L
     private var deviceKeyUnreadable = false
+    private var liveClient: SharedListsClient? = null
     private var stateChanged: (WindowsClientPresentation) -> Unit = {}
     private val storedConfiguration = configurationStore.load()
     private var presentation = WindowsClientPresentation(
@@ -213,9 +221,10 @@ class WindowsSynchronizationController(
                 statusMessage = "Connecting…",
             ),
         )
+        val client = clientFactory.create(parsedConfiguration)
         synchronizationRunner.run {
             suspend {
-                clientFactory.create(parsedConfiguration).synchronize()
+                client.synchronize()
             }.startCoroutine(
                 object : Continuation<ClientState> {
                     override val context = EmptyCoroutineContext
@@ -225,7 +234,10 @@ class WindowsSynchronizationController(
                             return
                         }
                         result.fold(
-                            onSuccess = ::showClientState,
+                            onSuccess = {
+                                liveClient = client
+                                showClientState(it)
+                            },
                             onFailure = { showConnectionFailure() },
                         )
                     }
@@ -234,12 +246,26 @@ class WindowsSynchronizationController(
         }
     }
 
+    fun createList(name: String) {
+        submit(name) { operationId -> CreateList(operationId, newListId(), name) }
+    }
+
+    fun deleteList(name: String) {
+        val list = cachedState.lists.firstOrNull { it.name == name } ?: return
+        submit(null) { operationId -> DeleteList(operationId, list.id) }
+    }
+
     fun observePresentation(observer: (WindowsClientPresentation) -> Unit) {
         stateChanged = observer
         observer(presentation)
     }
 
     fun presentation(): WindowsClientPresentation = presentation
+
+    fun renameList(currentName: String, newName: String) {
+        val list = cachedState.lists.firstOrNull { it.name == currentName } ?: return
+        submit(newName) { operationId -> RenameList(operationId, list.id, newName) }
+    }
 
     fun retryDeviceKey() {
         deviceKeyUnreadable = false
@@ -361,7 +387,22 @@ class WindowsSynchronizationController(
                 statusMessage = statusMessage(clientState, isLive),
             ),
         )
+        clientState.lastOperationOutcome?.let { outcome ->
+            update(
+                presentation.copy(
+                    statusMessage = when (outcome.outcome) {
+                        OperationOutcome.APPLIED -> "Saved"
+                        OperationOutcome.IGNORED -> "No change: the list was deleted."
+                        OperationOutcome.REJECTED -> "Not saved: invalid list name."
+                    },
+                ),
+            )
+        }
     }
+
+    private fun newListId(): SharedListId = SharedListId.parse(UUID.randomUUID().toString())
+
+    private fun newOperationId(): OperationId = OperationId.parse(UUID.randomUUID().toString())
 
     private fun emptyStateMessage(clientState: ClientState.Ready, isLive: Boolean): String? =
         when {
@@ -386,6 +427,43 @@ class WindowsSynchronizationController(
             clientState.connectivity == ConnectivityState.SYNCHRONIZING -> "Synchronizing…"
             else -> "Disconnected — cached lists are read-only"
         }
+
+    private fun submit(
+        name: String?,
+        command: (OperationId) -> EditCommand,
+    ) {
+        if (!presentation.editingEnabled) {
+            update(presentation.copy(statusMessage = "Editing is available only while synchronized."))
+            return
+        }
+        if (name != null && !validName(name)) {
+            update(presentation.copy(statusMessage = "Enter a list name of at most 100 characters."))
+            return
+        }
+        val client = requireNotNull(liveClient) { "Live client is missing." }
+        update(presentation.copy(editability = Editability.READ_ONLY, statusMessage = "Saving…"))
+        synchronizationRunner.run {
+            suspend { client.submit(command(newOperationId())) }.startCoroutine(
+                object : Continuation<ClientState> {
+                    override val context = EmptyCoroutineContext
+
+                    override fun resumeWith(result: Result<ClientState>) {
+                        result.fold(
+                            onSuccess = ::showClientState,
+                            onFailure = {
+                                update(presentation.copy(editability = Editability.READ_ONLY, statusMessage = "Unable to save change."))
+                            },
+                        )
+                    }
+                },
+            )
+        }
+    }
+
+    private fun validName(name: String): Boolean {
+        val trimmed = name.trim()
+        return trimmed.isNotEmpty() && trimmed.codePointCount(0, trimmed.length) <= 100
+    }
 
     @Synchronized
     private fun isCurrentConnectionAttempt(attempt: Long): Boolean = attempt == connectionAttempt

@@ -2,9 +2,16 @@ package dev.sharedlists.client
 
 import dev.sharedlists.protocol.AppliedThrough
 import dev.sharedlists.protocol.ChallengeRequest
+import dev.sharedlists.protocol.ClientOperation
+import dev.sharedlists.protocol.CreateList as ProtoCreateList
+import dev.sharedlists.protocol.DeleteList as ProtoDeleteList
+import dev.sharedlists.protocol.JournalEntry
 import dev.sharedlists.protocol.Live
 import dev.sharedlists.protocol.OpenSync
+import dev.sharedlists.protocol.OperationOutcome as ProtoOperationOutcome
+import dev.sharedlists.protocol.RenameList as ProtoRenameList
 import dev.sharedlists.protocol.SharedListsGrpcKt
+import dev.sharedlists.protocol.SubmitOperation
 import dev.sharedlists.protocol.SyncRequest
 import dev.sharedlists.protocol.SyncResponse
 import io.grpc.CallOptions
@@ -30,10 +37,13 @@ import java.util.Properties
 import javax.net.ssl.ManagerFactoryParameters
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel as CoroutineChannel
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
@@ -45,14 +55,26 @@ data class ServerEndpoint(
 )
 
 interface ClientStateStore {
+    fun hasCanonicalState(): Boolean = false
+
     fun loadCursor(): SynchronizationCursor?
 
+    fun loadCanonicalState(): CanonicalState = CanonicalState()
+
     fun save(cursor: SynchronizationCursor)
+
+    fun save(canonicalState: CanonicalState, cursor: SynchronizationCursor) {
+        save(cursor)
+    }
 }
 
 class FileClientStateStore(
     private val file: File,
 ) : ClientStateStore {
+    override fun hasCanonicalState(): Boolean =
+        file.exists() && Properties().also { properties -> file.inputStream().use(properties::load) }
+            .containsKey("list.count")
+
     override fun loadCursor(): SynchronizationCursor? {
         if (!file.exists()) {
             return null
@@ -66,7 +88,28 @@ class FileClientStateStore(
             }
     }
 
+    override fun loadCanonicalState(): CanonicalState {
+        if (!file.exists()) {
+            return CanonicalState()
+        }
+        return Properties().also { properties -> file.inputStream().use(properties::load) }
+            .let { properties ->
+                CanonicalState(
+                    (0 until properties.getProperty("list.count", "0").toInt()).map { index ->
+                        SharedList(
+                            id = SharedListId.parse(requireNotNull(properties.getProperty("list.$index.id"))),
+                            name = requireNotNull(properties.getProperty("list.$index.name")),
+                        )
+                    },
+                )
+            }
+    }
+
     override fun save(cursor: SynchronizationCursor) {
+        save(CanonicalState(), cursor)
+    }
+
+    override fun save(canonicalState: CanonicalState, cursor: SynchronizationCursor) {
         val parent = requireNotNull(file.parentFile) { "Client state file must have a parent directory." }
         parent.mkdirs()
         val temporaryFile = Files.createTempFile(parent.toPath(), "${file.name}.", ".tmp")
@@ -74,6 +117,11 @@ class FileClientStateStore(
             Properties().also { properties ->
                 properties.setProperty("generation", cursor.generation)
                 properties.setProperty("lastAppliedRevision", cursor.lastAppliedRevision.toString())
+                properties.setProperty("list.count", canonicalState.lists.size.toString())
+                canonicalState.lists.forEachIndexed { index, list ->
+                    properties.setProperty("list.$index.id", list.id.value)
+                    properties.setProperty("list.$index.name", list.name)
+                }
                 properties.store(stream, null)
             }
             stream.fd.sync()
@@ -92,84 +140,218 @@ class GrpcSharedListsClient(
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
 ) : SharedListsClient {
+    private var activeSession: ActiveSession? = null
+    private var cachedState = stateStore.loadCanonicalState()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override suspend fun synchronize(): ClientState {
+        activeSession?.close()
         val channel = NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
             .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
             .build()
         try {
-            return coroutineScope {
-                val unauthenticatedStub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
-                val challenge = unauthenticatedStub.getChallenge(
-                    ChallengeRequest.newBuilder().setKeyFingerprint(deviceSigner.keyFingerprint).build(),
-                )
-                val token = StreamJwt.create(
-                    deviceSigner,
-                    StreamChallenge(
-                        audience = challenge.audience,
-                        expiresAt = Instant.ofEpochSecond(challenge.expiresAtEpochSeconds),
-                        issuedAt = Instant.ofEpochSecond(challenge.issuedAtEpochSeconds),
-                        nonce = challenge.nonce.toByteArray(),
-                    ),
-                )
-                val stub = unauthenticatedStub.withInterceptors(BearerTokenInterceptor(token))
-                val requests = CoroutineChannel<SyncRequest>()
-                val initialResponse = CompletableDeferred<SyncResponse>()
-                val live = CompletableDeferred<Live>()
-                val responseJob = launch {
-                    stub.sync(requests.receiveAsFlow()).collect { response ->
-                        initialResponse.complete(response)
-                        if (response.hasLive()) live.complete(response.live)
-                    }
-                }
-                requests.send(
-                    SyncRequest.newBuilder().setOpen(
-                        OpenSync.newBuilder().also { open ->
-                            stateStore.loadCursor()?.let { cursor ->
-                                open.cursorBuilder
-                                    .setGeneration(cursor.generation)
-                                    .setLastAppliedRevision(cursor.lastAppliedRevision)
-                            }
-                        }.build(),
-                    ).build(),
-                )
-                val initial = initialResponse.await()
-                val (cursor, receivedLive) = if (initial.hasEmptySnapshot()) {
-                    val receivedSnapshot = initial.emptySnapshot
-                    val receivedCursor = SynchronizationCursor(receivedSnapshot.generation, receivedSnapshot.revision)
-                    stateStore.save(receivedCursor)
-                    requests.send(
-                        SyncRequest.newBuilder().setAppliedThrough(
-                            AppliedThrough.newBuilder().setRevision(receivedSnapshot.revision).build(),
-                        ).build(),
-                    )
-                    receivedCursor to live.await()
-                } else {
-                    check(initial.hasLive()) { "Server did not provide synchronization state." }
-                    val receivedLive = initial.live
-                    SynchronizationCursor(receivedLive.generation, receivedLive.revision)
-                        .also(stateStore::save) to receivedLive
-                }
-                check(receivedLive.generation == cursor.generation && receivedLive.revision == cursor.lastAppliedRevision) {
-                    "Server declared an inconsistent live cursor."
-                }
-                requests.close()
-                responseJob.cancelAndJoin()
-                ClientState.Ready(
-                    enrollment = EnrollmentState.ENROLLED,
-                    connectivity = ConnectivityState.LIVE,
-                    canonicalState = CanonicalState(),
-                    cursor = cursor,
-                )
+            val unauthenticatedStub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
+            val challenge = unauthenticatedStub.getChallenge(
+                ChallengeRequest.newBuilder().setKeyFingerprint(deviceSigner.keyFingerprint).build(),
+            )
+            val token = StreamJwt.create(
+                deviceSigner,
+                StreamChallenge(
+                    audience = challenge.audience,
+                    expiresAt = Instant.ofEpochSecond(challenge.expiresAtEpochSeconds),
+                    issuedAt = Instant.ofEpochSecond(challenge.issuedAtEpochSeconds),
+                    nonce = challenge.nonce.toByteArray(),
+                ),
+            )
+            val session = ActiveSession(
+                channel,
+                unauthenticatedStub.withInterceptors(BearerTokenInterceptor(token)),
+                cachedState,
+            )
+            activeSession = session
+            session.open(stateStore.loadCursor()?.takeIf { stateStore.hasCanonicalState() })
+            val live = session.live.await()
+            check(live.generation == session.cursor.generation && live.revision == session.cursor.lastAppliedRevision) {
+                "Server declared an inconsistent live cursor."
             }
-        } finally {
+            return session.ready()
+        } catch (exception: Exception) {
             channel.shutdownNow()
+            activeSession = null
+            throw exception
         }
     }
 
-    override suspend fun submit(command: EditCommand): ClientState =
-        error("Edit synchronization is not established by the acceptance harness.")
+    override suspend fun submit(command: EditCommand): ClientState {
+        val session = requireNotNull(activeSession) { "Synchronization is not live." }
+        return session.submit(command)
+    }
 
+    private inner class ActiveSession(
+        private val channel: io.grpc.ManagedChannel,
+        private val stub: SharedListsGrpcKt.SharedListsCoroutineStub,
+        initialState: CanonicalState,
+    ) {
+        private var canonicalState = initialState
+        private var unconfirmedOperationId: String? = null
+        private var unconfirmedOutcome: CompletableDeferred<DurableOperationOutcome>? = null
+        private val requests = CoroutineChannel<SyncRequest>()
+        private val responseJob = scope.launch {
+            try {
+                stub.sync(requests.receiveAsFlow()).collect(::receive)
+            } catch (exception: CancellationException) {
+                fail(exception)
+                throw exception
+            } catch (exception: Exception) {
+                fail(exception)
+            }
+        }
+
+        lateinit var cursor: SynchronizationCursor
+            private set
+        val live = CompletableDeferred<Live>()
+
+        suspend fun open(cursor: SynchronizationCursor?) {
+            requests.send(
+                SyncRequest.newBuilder().setOpen(
+                    OpenSync.newBuilder().also { open ->
+                        cursor?.let {
+                            open.cursorBuilder.setGeneration(it.generation).setLastAppliedRevision(it.lastAppliedRevision)
+                        }
+                    }.build(),
+                ).build(),
+            )
+        }
+
+        suspend fun submit(command: EditCommand): ClientState {
+            check(unconfirmedOutcome == null) { "An edit is already awaiting confirmation." }
+            val outcome = CompletableDeferred<DurableOperationOutcome>()
+            unconfirmedOperationId = command.operationId.value
+            unconfirmedOutcome = outcome
+            requests.send(
+                SyncRequest.newBuilder().setSubmitOperation(
+                    SubmitOperation.newBuilder().setOperation(command.toProto()).build(),
+                ).build(),
+            )
+            return ready(outcome.await()).also {
+                unconfirmedOperationId = null
+                unconfirmedOutcome = null
+            }
+        }
+
+        suspend fun close() {
+            requests.close()
+            responseJob.cancelAndJoin()
+            channel.shutdownNow()
+        }
+
+        fun ready(outcome: DurableOperationOutcome? = null): ClientState.Ready =
+            ClientState.Ready(
+                enrollment = EnrollmentState.ENROLLED,
+                connectivity = ConnectivityState.LIVE,
+                canonicalState = canonicalState,
+                cursor = cursor,
+                lastOperationOutcome = outcome,
+            )
+
+        private suspend fun receive(response: SyncResponse) {
+            when {
+                response.hasEmptySnapshot() -> acceptSnapshot(
+                    response.emptySnapshot.generation,
+                    response.emptySnapshot.revision,
+                    CanonicalState(),
+                )
+
+                response.hasSnapshot() -> acceptSnapshot(
+                    response.snapshot.generation,
+                    response.snapshot.revision,
+                    CanonicalState(response.snapshot.listsList.map { SharedList(SharedListId.parse(it.id), it.name) }),
+                )
+
+                response.hasJournalBatch() -> {
+                    if (!::cursor.isInitialized) {
+                        cursor = SynchronizationCursor(response.journalBatch.generation, 0)
+                    }
+                    response.journalBatch.entriesList.forEach { entry -> apply(entry) }
+                }
+                response.hasLive() -> {
+                    if (!::cursor.isInitialized) {
+                        cursor = SynchronizationCursor(response.live.generation, response.live.revision)
+                        stateStore.save(canonicalState, cursor)
+                    }
+                    live.complete(response.live)
+                }
+                else -> error("Server sent an unknown synchronization response.")
+            }
+        }
+
+        private suspend fun acceptSnapshot(generation: String, revision: Long, state: CanonicalState) {
+            canonicalState = state
+            cachedState = state
+            cursor = SynchronizationCursor(generation, revision)
+            persistAndAcknowledge()
+        }
+
+        private suspend fun apply(entry: JournalEntry) {
+            val operation = entry.operation
+            val lists = canonicalState.lists.toMutableList()
+            if (entry.outcome == ProtoOperationOutcome.OPERATION_OUTCOME_APPLIED) {
+                when (operation.operationCase) {
+                    ClientOperation.OperationCase.CREATE_LIST -> lists += SharedList(
+                        SharedListId.parse(operation.createList.listId),
+                        operation.createList.name,
+                    )
+                    ClientOperation.OperationCase.RENAME_LIST -> {
+                        val index = lists.indexOfFirst { it.id.value == operation.renameList.listId }
+                        if (index >= 0) lists[index] = lists[index].copy(name = operation.renameList.name)
+                    }
+                    ClientOperation.OperationCase.DELETE_LIST -> lists.removeAll { it.id.value == operation.deleteList.listId }
+                    ClientOperation.OperationCase.OPERATION_NOT_SET -> error("Journal entry has no operation.")
+                }
+                canonicalState = CanonicalState(lists.sortedBy { it.name.lowercase() })
+                cachedState = canonicalState
+            }
+            cursor = SynchronizationCursor(cursor.generation, entry.revision)
+            persistAndAcknowledge()
+            if (unconfirmedOutcome != null && operation.operationId == unconfirmedOperationId) {
+                unconfirmedOutcome?.complete(DurableOperationOutcome(OperationId.parse(operation.operationId), entry.outcome.toClientOutcome()))
+            }
+        }
+
+        private suspend fun persistAndAcknowledge() {
+            stateStore.save(canonicalState, cursor)
+            requests.send(
+                SyncRequest.newBuilder().setAppliedThrough(
+                    AppliedThrough.newBuilder().setRevision(cursor.lastAppliedRevision).build(),
+                ).build(),
+            )
+        }
+
+        private fun fail(exception: Exception) {
+            live.completeExceptionally(exception)
+            unconfirmedOutcome?.completeExceptionally(exception)
+        }
+
+        private fun EditCommand.toProto(): ClientOperation =
+            ClientOperation.newBuilder().setOperationId(operationId.value).apply {
+                when (this@toProto) {
+                    is CreateList -> setCreateList(ProtoCreateList.newBuilder().setListId(listId.value).setName(name))
+                    is DeleteList -> setDeleteList(ProtoDeleteList.newBuilder().setListId(listId.value))
+                    is RenameList -> setRenameList(ProtoRenameList.newBuilder().setListId(listId.value).setName(name))
+                }
+            }.build()
+    }
 }
+
+private fun ProtoOperationOutcome.toClientOutcome(): OperationOutcome =
+    when (this) {
+        ProtoOperationOutcome.OPERATION_OUTCOME_APPLIED -> OperationOutcome.APPLIED
+        ProtoOperationOutcome.OPERATION_OUTCOME_IGNORED -> OperationOutcome.IGNORED
+        ProtoOperationOutcome.OPERATION_OUTCOME_REJECTED -> OperationOutcome.REJECTED
+        ProtoOperationOutcome.OPERATION_OUTCOME_UNSPECIFIED,
+        ProtoOperationOutcome.UNRECOGNIZED,
+        -> error("Journal entry has no valid outcome.")
+    }
 
 private class PinnedTrustManager(
     pin: String,

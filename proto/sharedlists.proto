@@ -35,11 +35,74 @@ message AppliedThrough {
   int64 revision = 1;
 }
 
+message SubmitOperation {
+  ClientOperation operation = 1;
+}
+
 message SyncRequest {
   oneof message {
     OpenSync open = 1;
     AppliedThrough applied_through = 2;
+    SubmitOperation submit_operation = 3;
   }
+}
+
+message SharedList {
+  string id = 1;
+  string name = 2;
+}
+
+message ListTombstone {
+  string list_id = 1;
+  int64 deleted_revision = 2;
+}
+
+message Snapshot {
+  string generation = 1;
+  int64 revision = 2;
+  repeated SharedList lists = 3;
+  repeated ListTombstone tombstones = 4;
+}
+
+message CreateList {
+  string list_id = 1;
+  string name = 2;
+}
+
+message RenameList {
+  string list_id = 1;
+  string name = 2;
+}
+
+message DeleteList {
+  string list_id = 1;
+}
+
+message ClientOperation {
+  string operation_id = 1;
+  oneof operation {
+    CreateList create_list = 2;
+    RenameList rename_list = 3;
+    DeleteList delete_list = 4;
+  }
+}
+
+enum OperationOutcome {
+  OPERATION_OUTCOME_UNSPECIFIED = 0;
+  OPERATION_OUTCOME_APPLIED = 1;
+  OPERATION_OUTCOME_IGNORED = 2;
+  OPERATION_OUTCOME_REJECTED = 3;
+}
+
+message JournalEntry {
+  int64 revision = 1;
+  ClientOperation operation = 2;
+  OperationOutcome outcome = 3;
+}
+
+message JournalBatch {
+  string generation = 1;
+  repeated JournalEntry entries = 2;
 }
 
 message EmptySnapshot {
@@ -56,5 +119,7 @@ message SyncResponse {
   oneof message {
     EmptySnapshot empty_snapshot = 1;
     Live live = 2;
+    Snapshot snapshot = 3;
+    JournalBatch journal_batch = 4;
   }
 }

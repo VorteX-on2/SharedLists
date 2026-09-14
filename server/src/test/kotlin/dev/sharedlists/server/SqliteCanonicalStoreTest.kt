@@ -33,6 +33,9 @@ class SqliteCanonicalStoreTest {
             assertTrue(fixture.store.snapshot().lists.none { it.id == listId })
             assertEquals(listId, fixture.store.snapshot().tombstones.single().listId)
             assertEquals(5, fixture.store.journalAfter(0).size)
+            fixture.store.catchUpAfter(0).also { catchUp ->
+                assertEquals(catchUp.snapshot.revision, catchUp.journalEntries.last().revision)
+            }
 
             fixture.reopen()
             assertEquals(5, fixture.store.snapshot().revision)
@@ -56,6 +59,29 @@ class SqliteCanonicalStoreTest {
             assertFailsWith<IllegalArgumentException> {
                 fixture.store.submit(create("31111111-1111-4111-8111-111111111111", "not-a-uuid", "Name"))
             }
+        }
+    }
+
+    @Test
+    fun `uses a Unicode case fold approximation for name uniqueness`() {
+        fixture().use { fixture ->
+            fixture.store.submit(
+                create(
+                    "21111111-1111-4111-8111-111111111111",
+                    "11111111-1111-4111-8111-111111111111",
+                    "Straße",
+                ),
+            )
+
+            val collision = fixture.store.submit(
+                create(
+                    "31111111-1111-4111-8111-111111111111",
+                    "41111111-1111-4111-8111-111111111111",
+                    "STRASSE",
+                ),
+            )
+
+            assertEquals("STRASSE (2)", collision.operation.createList.name)
         }
     }
 

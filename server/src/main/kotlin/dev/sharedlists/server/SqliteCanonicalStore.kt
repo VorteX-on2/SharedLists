@@ -120,6 +120,14 @@ internal class SqliteCanonicalStore(
     }
 
     fun journalAfter(revision: Long): List<JournalEntry> = synchronized(lock) {
+        journalAfterLocked(revision)
+    }
+
+    fun catchUpAfter(revision: Long): CanonicalCatchUp = synchronized(lock) {
+        CanonicalCatchUp(metadata(), journalAfterLocked(revision))
+    }
+
+    private fun journalAfterLocked(revision: Long): List<JournalEntry> =
         connection.prepareStatement(
             """
             SELECT revision, operation_id, operation_type, list_id, list_name, outcome
@@ -134,7 +142,6 @@ internal class SqliteCanonicalStore(
                     }
                 }
             }
-        }
     }
 
     fun submit(operation: ClientOperation): JournalEntry {
@@ -392,7 +399,10 @@ internal class SqliteCanonicalStore(
     private companion object {
         const val MAXIMUM_NAME_CODE_POINTS = 100
 
-        fun fold(value: String): String = value.lowercase(Locale.ROOT)
+        fun fold(value: String): String =
+            value.uppercase(Locale.ROOT)
+                .lowercase(Locale.ROOT)
+                .replace('\u03C2', '\u03C3')
 
         fun truncateCodePoints(value: String, count: Int): String {
             val end = value.offsetByCodePoints(0, minOf(count, value.codePointCount(0, value.length)))
@@ -430,4 +440,9 @@ internal data class CanonicalSnapshot(
     val revision: Long,
     val lists: List<SharedList> = emptyList(),
     val tombstones: List<ListTombstone> = emptyList(),
+)
+
+internal data class CanonicalCatchUp(
+    val snapshot: CanonicalSnapshot,
+    val journalEntries: List<JournalEntry>,
 )

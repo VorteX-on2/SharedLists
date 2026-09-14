@@ -11,6 +11,7 @@ import dev.sharedlists.protocol.OpenSync
 import dev.sharedlists.protocol.OperationOutcome as ProtoOperationOutcome
 import dev.sharedlists.protocol.RenameList as ProtoRenameList
 import dev.sharedlists.protocol.SharedListsGrpcKt
+import dev.sharedlists.protocol.SubmitOperation
 import dev.sharedlists.protocol.SyncRequest
 import dev.sharedlists.protocol.SyncResponse
 import io.grpc.CallOptions
@@ -55,7 +56,13 @@ data class ServerEndpoint(
 interface ClientStateStore {
     fun loadCursor(): SynchronizationCursor?
 
+    fun loadCanonicalState(): CanonicalState = CanonicalState()
+
     fun save(cursor: SynchronizationCursor)
+
+    fun save(canonicalState: CanonicalState, cursor: SynchronizationCursor) {
+        save(cursor)
+    }
 }
 
 class FileClientStateStore(
@@ -74,7 +81,28 @@ class FileClientStateStore(
             }
     }
 
+    override fun loadCanonicalState(): CanonicalState {
+        if (!file.exists()) {
+            return CanonicalState()
+        }
+        return Properties().also { properties -> file.inputStream().use(properties::load) }
+            .let { properties ->
+                CanonicalState(
+                    (0 until properties.getProperty("list.count", "0").toInt()).map { index ->
+                        SharedList(
+                            id = SharedListId.parse(requireNotNull(properties.getProperty("list.$index.id"))),
+                            name = requireNotNull(properties.getProperty("list.$index.name")),
+                        )
+                    },
+                )
+            }
+    }
+
     override fun save(cursor: SynchronizationCursor) {
+        save(CanonicalState(), cursor)
+    }
+
+    override fun save(canonicalState: CanonicalState, cursor: SynchronizationCursor) {
         val parent = requireNotNull(file.parentFile) { "Client state file must have a parent directory." }
         parent.mkdirs()
         val temporaryFile = Files.createTempFile(parent.toPath(), "${file.name}.", ".tmp")
@@ -82,6 +110,11 @@ class FileClientStateStore(
             Properties().also { properties ->
                 properties.setProperty("generation", cursor.generation)
                 properties.setProperty("lastAppliedRevision", cursor.lastAppliedRevision.toString())
+                properties.setProperty("list.count", canonicalState.lists.size.toString())
+                canonicalState.lists.forEachIndexed { index, list ->
+                    properties.setProperty("list.$index.id", list.id.value)
+                    properties.setProperty("list.$index.name", list.name)
+                }
                 properties.store(stream, null)
             }
             stream.fd.sync()
@@ -101,7 +134,7 @@ class GrpcSharedListsClient(
     private val stateStore: ClientStateStore,
 ) : SharedListsClient {
     private var activeSession: ActiveSession? = null
-    private var cachedState = CanonicalState()
+    private var cachedState = stateStore.loadCanonicalState()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override suspend fun synchronize(): ClientState {
@@ -153,8 +186,8 @@ class GrpcSharedListsClient(
         initialState: CanonicalState,
     ) {
         private var canonicalState = initialState
-        private var pendingOperationId: String? = null
-        private var pendingOutcome: CompletableDeferred<DurableOperationOutcome>? = null
+        private var unconfirmedOperationId: String? = null
+        private var unconfirmedOutcome: CompletableDeferred<DurableOperationOutcome>? = null
         private val requests = CoroutineChannel<SyncRequest>()
         private val responseJob = scope.launch {
             stub.sync(requests.receiveAsFlow()).collect(::receive)
@@ -177,18 +210,18 @@ class GrpcSharedListsClient(
         }
 
         suspend fun submit(command: EditCommand): ClientState {
-            check(pendingOutcome == null) { "An edit is already awaiting confirmation." }
+            check(unconfirmedOutcome == null) { "An edit is already awaiting confirmation." }
             val outcome = CompletableDeferred<DurableOperationOutcome>()
-            pendingOperationId = command.operationId.value
-            pendingOutcome = outcome
+            unconfirmedOperationId = command.operationId.value
+            unconfirmedOutcome = outcome
             requests.send(
                 SyncRequest.newBuilder().setSubmitOperation(
-                    dev.sharedlists.protocol.SubmitOperation.newBuilder().setOperation(command.toProto()).build(),
+                    SubmitOperation.newBuilder().setOperation(command.toProto()).build(),
                 ).build(),
             )
             return ready(outcome.await()).also {
-                pendingOperationId = null
-                pendingOutcome = null
+                unconfirmedOperationId = null
+                unconfirmedOutcome = null
             }
         }
 
@@ -230,7 +263,7 @@ class GrpcSharedListsClient(
                 response.hasLive() -> {
                     if (!::cursor.isInitialized) {
                         cursor = SynchronizationCursor(response.live.generation, response.live.revision)
-                        stateStore.save(cursor)
+                        stateStore.save(canonicalState, cursor)
                     }
                     live.complete(response.live)
                 }
@@ -266,13 +299,13 @@ class GrpcSharedListsClient(
             }
             cursor = SynchronizationCursor(cursor.generation, entry.revision)
             persistAndAcknowledge()
-            if (pendingOutcome != null && operation.operationId == pendingOperationId) {
-                pendingOutcome?.complete(DurableOperationOutcome(OperationId.parse(operation.operationId), entry.outcome.toClientOutcome()))
+            if (unconfirmedOutcome != null && operation.operationId == unconfirmedOperationId) {
+                unconfirmedOutcome?.complete(DurableOperationOutcome(OperationId.parse(operation.operationId), entry.outcome.toClientOutcome()))
             }
         }
 
         private suspend fun persistAndAcknowledge() {
-            stateStore.save(cursor)
+            stateStore.save(canonicalState, cursor)
             requests.send(
                 SyncRequest.newBuilder().setAppliedThrough(
                     AppliedThrough.newBuilder().setRevision(cursor.lastAppliedRevision).build(),

@@ -84,16 +84,15 @@ internal class SharedListsService(
                             requireRequest(event.request.hasAppliedThrough() &&
                                 event.request.appliedThrough.revision == synchronizedRevision)
                             lastAcknowledgedRevision = synchronizedRevision
-                            val entries = store.journalAfter(synchronizedRevision)
-                            if (entries.isEmpty()) {
-                                val current = store.snapshot()
+                            val catchUp = store.catchUpAfter(synchronizedRevision)
+                            if (catchUp.journalEntries.isEmpty()) {
                                 phase = Phase.LIVE
-                                lastDeliveredRevision = current.revision
-                                send(live(current))
+                                lastDeliveredRevision = catchUp.snapshot.revision
+                                send(live(catchUp.snapshot))
                             } else {
-                                synchronizedRevision = entries.last().revision
+                                synchronizedRevision = catchUp.journalEntries.last().revision
                                 lastDeliveredRevision = synchronizedRevision
-                                send(journal(generation, entries))
+                                send(journal(generation, catchUp.journalEntries))
                             }
                         }
 
@@ -104,6 +103,7 @@ internal class SharedListsService(
                                 lastAcknowledgedRevision = revision
                             } else {
                                 requireRequest(event.request.hasSubmitOperation())
+                                requireRequest(lastAcknowledgedRevision == lastDeliveredRevision)
                                 try {
                                     val entry = store.submit(event.request.submitOperation.operation)
                                     if (entry.revision > lastDeliveredRevision) {

@@ -4,6 +4,7 @@ import dev.sharedlists.client.CanonicalState
 import dev.sharedlists.client.ClientState
 import dev.sharedlists.client.ConnectivityState
 import dev.sharedlists.client.CreateList
+import dev.sharedlists.client.DeleteList
 import dev.sharedlists.client.DeviceSigner
 import dev.sharedlists.client.EditCommand
 import dev.sharedlists.client.EnrollmentState
@@ -95,6 +96,28 @@ class RealServerAcceptanceTest {
                 ).lastOperationOutcome?.outcome,
             )
             assertEquals(listOf("Kitchen"), second.synchronizeBlocking().canonicalState.lists.map { it.name })
+            assertEquals(
+                OperationOutcome.APPLIED,
+                first.submitBlocking(
+                    DeleteList(
+                        operationId = OperationId.parse("41111111-1111-4111-8111-111111111111"),
+                        listId = listId,
+                    ),
+                ).lastOperationOutcome?.outcome,
+            )
+            assertEquals(emptyList(), second.synchronizeBlocking().canonicalState.lists)
+            assertEquals(
+                OperationOutcome.IGNORED,
+                first.submitBlocking(
+                    RenameList(
+                        operationId = OperationId.parse("51111111-1111-4111-8111-111111111111"),
+                        listId = listId,
+                        name = "Resurrected",
+                    ),
+                ).lastOperationOutcome?.outcome,
+            )
+            fixture.restart()
+            assertEquals(emptyList(), fixture.client(1).synchronizeBlocking().canonicalState.lists)
         }
     }
 

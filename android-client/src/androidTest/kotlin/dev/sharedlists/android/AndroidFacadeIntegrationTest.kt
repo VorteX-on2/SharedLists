@@ -3,11 +3,31 @@ package dev.sharedlists.android
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.sharedlists.client.EnrollmentState
+import dev.sharedlists.client.ServerEndpoint
 import dev.sharedlists.client.SharedList
+import dev.sharedlists.client.StreamChallenge
+import dev.sharedlists.client.StreamJwt
+import dev.sharedlists.protocol.ChallengeRequest
+import dev.sharedlists.protocol.OpenSync
+import dev.sharedlists.protocol.SharedListsGrpcKt
+import dev.sharedlists.protocol.SyncRequest
+import io.grpc.CallOptions
+import io.grpc.Channel
+import io.grpc.ClientCall
+import io.grpc.ClientInterceptor
+import io.grpc.ForwardingClientCall
+import io.grpc.Metadata
+import io.grpc.MethodDescriptor
+import io.grpc.StatusRuntimeException
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -15,6 +35,44 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AndroidFacadeIntegrationTest {
+    @Test
+    fun rejectsAConsumedChallengeTokenFromAndroidKeystoreSigner() = runBlocking {
+        val configuration = fixtureConfiguration()
+        val signer = requireNotNull(
+            AndroidKeystoreDeviceEnrollment(InstrumentationRegistry.getInstrumentation().targetContext).current(),
+        )
+        val channel = AndroidPinnedChannelFactory().create(
+            ServerEndpoint(configuration.host, configuration.port.toInt(), configuration.fingerprint),
+        )
+        try {
+            val unauthenticated = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
+            val challenge = unauthenticated.getChallenge(
+                ChallengeRequest.newBuilder().setKeyFingerprint(signer.keyFingerprint).build(),
+            )
+            val token = StreamJwt.create(
+                signer,
+                StreamChallenge(
+                    audience = challenge.audience,
+                    expiresAt = Instant.ofEpochSecond(challenge.expiresAtEpochSeconds),
+                    issuedAt = Instant.ofEpochSecond(challenge.issuedAtEpochSeconds),
+                    nonce = challenge.nonce.toByteArray(),
+                ),
+            )
+            val authenticated = unauthenticated.withInterceptors(BearerTokenInterceptor(token))
+            val open = flowOf(SyncRequest.newBuilder().setOpen(OpenSync.newBuilder().setSupportsBoundedTransfer(true)).build())
+
+            authenticated.sync(open).first { it.hasLive() }
+            try {
+                authenticated.sync(open).first()
+                throw AssertionError("A consumed challenge token opened a second synchronization stream.")
+            } catch (exception: StatusRuntimeException) {
+                assertEquals(io.grpc.Status.Code.UNAUTHENTICATED, exception.status.code)
+            }
+        } finally {
+            channel.shutdownNow()
+        }
+    }
+
     @Test
     fun appliesEditsAndRestoresCachedCanonicalStateWithProductionFacade() {
         val configuration = fixtureConfiguration()
@@ -192,4 +250,27 @@ class AndroidFacadeIntegrationTest {
         val port: String,
         val fingerprint: String,
     )
+
+    private class BearerTokenInterceptor(
+        private val token: String,
+    ) : ClientInterceptor {
+        override fun <RequestT : Any, ResponseT : Any> interceptCall(
+            method: MethodDescriptor<RequestT, ResponseT>,
+            callOptions: CallOptions,
+            next: Channel,
+        ): ClientCall<RequestT, ResponseT> =
+            object : ForwardingClientCall.SimpleForwardingClientCall<RequestT, ResponseT>(
+                next.newCall(method, callOptions),
+            ) {
+                override fun start(responseListener: Listener<ResponseT>, headers: Metadata) {
+                    headers.put(AUTHORIZATION, "Bearer $token")
+                    super.start(responseListener, headers)
+                }
+            }
+
+        private companion object {
+            val AUTHORIZATION: Metadata.Key<String> =
+                Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER)
+        }
+    }
 }

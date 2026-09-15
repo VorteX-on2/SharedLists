@@ -19,6 +19,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import dev.sharedlists.client.SharedList
 import dev.sharedlists.client.EnrollmentState
+import dev.sharedlists.client.ListItemId
 import dev.sharedlists.client.SharedListId
 
 class SharedListsActivity : Activity() {
@@ -26,7 +27,9 @@ class SharedListsActivity : Activity() {
     private lateinit var content: LinearLayout
     private lateinit var status: TextView
     private lateinit var networkCallback: ConnectivityManager.NetworkCallback
+    private var hideMarkedItems = false
     private var selectedListId: SharedListId? = null
+    private var sortAlphabetically = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,6 +78,14 @@ class SharedListsActivity : Activity() {
             }
             if (presentation.exportRequired) addButton("Export public key", ::sharePublicKey)
             if (presentation.enrollment == EnrollmentState.ENROLLED) {
+                addButton(if (hideMarkedItems) "Show marked items" else "Hide marked items") {
+                    hideMarkedItems = !hideMarkedItems
+                    render(presentation)
+                }
+                addButton(if (sortAlphabetically) "Use manual order" else "Sort alphabetically") {
+                    sortAlphabetically = !sortAlphabetically
+                    render(presentation)
+                }
                 addLists(presentation.canonicalState.lists)
                 if (presentation.editingEnabled) addButton("Create shared list") { prompt("New shared list") { controller.createList(it) } }
                 addButton("Reset local synchronization data", controller::resetLocalData)
@@ -107,7 +118,7 @@ class SharedListsActivity : Activity() {
         } else {
             lists.forEach { list ->
                 addButton(list.name) { showList(list) }
-                list.items.filterNot { it.marked }.take(4).forEach { item -> addText(item.text) }
+                displayedItems(list).take(4).forEach { item -> addText(item.text) }
             }
         }
     }
@@ -134,17 +145,23 @@ class SharedListsActivity : Activity() {
             addView(LinearLayout(this@SharedListsActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 addView(TextView(this@SharedListsActivity).apply { text = selected.name; textSize = 22f })
-                selected.items.forEach { item ->
+                addButtonTo(this, "Rename list") { prompt("Rename shared list", selected.name) { controller.renameList(selected.id, it) } }
+                addButtonTo(this, "Add item") { prompt("New item") { controller.createItem(selected.id, it) } }
+                displayedItems(selected).forEach { item ->
                     addView(Button(this@SharedListsActivity).apply {
                         text = if (item.marked) "✓ ${item.text}" else item.text
                         contentDescription = "Edit ${item.text}"
                         setOnClickListener { prompt("Edit item", item.text) { controller.editItemText(selected.id, item.id, it) } }
                     })
+                    addView(LinearLayout(this@SharedListsActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(itemActionButton(selected, item.id, item.marked, "Mark") { controller.setMarked(selected.id, item.id, !item.marked) })
+                        addView(itemActionButton(selected, item.id, item.marked, "Up") { moveVisibleItem(selected, item.id, -1) })
+                        addView(itemActionButton(selected, item.id, item.marked, "Down") { moveVisibleItem(selected, item.id, 1) })
+                        addView(itemActionButton(selected, item.id, item.marked, "Delete") { controller.deleteItem(selected.id, item.id) })
+                    })
                 }
-                addView(Button(this@SharedListsActivity).apply {
-                    text = "Open list controls"
-                    setOnClickListener { showList(selected) }
-                })
+                addButtonTo(this, "Delete list") { confirmDeleteList(selected) }
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
         })
     }
@@ -163,7 +180,7 @@ class SharedListsActivity : Activity() {
             text = "Add item"
             setOnClickListener { prompt("New item") { controller.createItem(list.id, it) } }
         })
-        list.items.forEachIndexed { index, item ->
+        displayedItems(list).forEachIndexed { index, item ->
             container.addView(Button(this).apply {
                 text = if (item.marked) "✓ ${item.text}" else item.text
                 contentDescription = "Edit ${item.text}"
@@ -178,12 +195,12 @@ class SharedListsActivity : Activity() {
                 addView(Button(this@SharedListsActivity).apply {
                     text = "Up"
                     isEnabled = index > 0
-                    setOnClickListener { controller.moveItem(list.id, item.id, index - 1) }
+                    setOnClickListener { moveVisibleItem(list, item.id, -1) }
                 })
                 addView(Button(this@SharedListsActivity).apply {
                     text = "Down"
-                    isEnabled = index < list.items.lastIndex
-                    setOnClickListener { controller.moveItem(list.id, item.id, index + 1) }
+                    isEnabled = index < displayedItems(list).lastIndex
+                    setOnClickListener { moveVisibleItem(list, item.id, 1) }
                 })
                 addView(Button(this@SharedListsActivity).apply {
                     text = "Delete"
@@ -191,16 +208,7 @@ class SharedListsActivity : Activity() {
                 })
             })
         }
-        container.addView(Button(this).apply {
-            text = "Delete list"
-            setOnClickListener {
-                AlertDialog.Builder(this@SharedListsActivity)
-                    .setMessage("Delete ${list.name}?")
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Delete") { _, _ -> controller.deleteList(list.id) }
-                    .show()
-            }
-        })
+        container.addView(Button(this).apply { text = "Delete list"; setOnClickListener { confirmDeleteList(list) } })
         AlertDialog.Builder(this).setView(ScrollView(this).apply { addView(container) }).setNegativeButton("Close", null).show()
     }
 
@@ -218,12 +226,65 @@ class SharedListsActivity : Activity() {
         })
     }
 
+    private fun addButtonTo(container: LinearLayout, label: String, action: () -> Unit) {
+        container.addView(Button(this).apply {
+            text = label
+            contentDescription = label
+            setOnClickListener { action() }
+        })
+    }
+
     private fun addText(value: String) {
         content.addView(TextView(this).apply {
             text = value
             gravity = Gravity.START
             textSize = 18f
         })
+    }
+
+    private fun confirmDeleteList(list: SharedList) {
+        AlertDialog.Builder(this)
+            .setMessage("Delete ${list.name}?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ -> controller.deleteList(list.id) }
+            .show()
+    }
+
+    private fun displayedItems(list: SharedList) =
+        list.items.filterNot { hideMarkedItems && it.marked }
+            .let { items -> if (sortAlphabetically) items.sortedBy { it.text.lowercase() } else items }
+
+    private fun itemActionButton(
+        list: SharedList,
+        itemId: ListItemId,
+        marked: Boolean,
+        label: String,
+        action: () -> Unit,
+    ): Button =
+        Button(this).apply {
+            text = if (label == "Mark" && marked) "Unmark" else label
+            contentDescription = "$text ${list.name}"
+            val itemIndex = displayedItems(list).indexOfFirst { it.id == itemId }
+            isEnabled = when (label) {
+                "Up" -> itemIndex > 0
+                "Down" -> itemIndex in 0 until displayedItems(list).lastIndex
+                else -> true
+            }
+            setOnClickListener { action() }
+        }
+
+    private fun moveVisibleItem(list: SharedList, itemId: ListItemId, direction: Int) {
+        val visibleItems = displayedItems(list)
+        val currentIndex = visibleItems.indexOfFirst { it.id == itemId }
+        val destinationIndex = (currentIndex + direction).coerceIn(0, visibleItems.lastIndex)
+        if (currentIndex < 0 || destinationIndex == currentIndex) return
+        val remainingItems = visibleItems.filterNot { it.id == itemId }
+        controller.moveItem(
+            list.id,
+            itemId,
+            remainingItems.getOrNull(destinationIndex - 1)?.id,
+            remainingItems.getOrNull(destinationIndex)?.id,
+        )
     }
 
     private fun sharePublicKey() {

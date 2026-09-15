@@ -50,6 +50,24 @@ tlsPrivateKeyFile=data/tls/server-key.pem
     $fingerprint = ($fingerprintLine -replace ".*tlsFingerprint=", "").Replace(":", "")
     & $Adb shell am instrument -w -e class dev.sharedlists.android.AndroidFacadeIntegrationTest -e serverHost 10.0.2.2 -e serverPort $Port -e serverFingerprint $fingerprint "dev.sharedlists.android.test/androidx.test.runner.AndroidJUnitRunner"
     if ($LASTEXITCODE -ne 0) { throw "Android production facade integration failed." }
+
+    Stop-Process -Id $serverProcess.Id
+    $serverProcess.WaitForExit()
+    Remove-Item -LiteralPath "$fixture\data\authorized-devices\android.pem"
+    $serverProcess = Start-Process java -ArgumentList "-cp", $classpath, "dev.sharedlists.server.MainKt", "--config", "$fixture\sharedlists.properties" -WorkingDirectory $fixture -RedirectStandardOutput "$fixture\revoked-server.log" -RedirectStandardError "$fixture\revoked-server.err" -PassThru
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        Start-Sleep -Milliseconds 100
+        $serverOutput = if (Test-Path "$fixture\revoked-server.log") {
+            Get-Content "$fixture\revoked-server.log" -Raw
+        } else {
+            ""
+        }
+        $ready = $serverOutput -and $serverOutput.Contains("STARTED serviceUri=https://10.0.2.2:$Port")
+    } while (!$ready -and [DateTime]::UtcNow -lt $deadline)
+    if (!$ready) { throw "Revoked standalone server did not become ready: $(Get-Content "$fixture\revoked-server.err" -Raw)" }
+    & $Adb shell am instrument -w -e class "dev.sharedlists.android.AndroidFacadeIntegrationTest#showsReadOnlyRecoveryAfterStandaloneServerRevokesEnrollment" -e expectRevoked true -e serverHost 10.0.2.2 -e serverPort $Port -e serverFingerprint $fingerprint "dev.sharedlists.android.test/androidx.test.runner.AndroidJUnitRunner"
+    if ($LASTEXITCODE -ne 0) { throw "Android revoked-enrollment recovery integration failed." }
 } finally {
     if ($null -ne $serverProcess -and !$serverProcess.HasExited) {
         Stop-Process -Id $serverProcess.Id

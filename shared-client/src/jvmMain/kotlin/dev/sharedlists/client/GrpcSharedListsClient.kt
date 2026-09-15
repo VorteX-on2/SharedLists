@@ -26,6 +26,7 @@ import io.grpc.Channel
 import io.grpc.ClientCall
 import io.grpc.ClientInterceptor
 import io.grpc.ForwardingClientCall
+import io.grpc.ManagedChannel
 import io.grpc.Metadata
 import io.grpc.MethodDescriptor
 import io.grpc.Status
@@ -261,7 +262,7 @@ private object OperationCodec {
 }
 
 class GrpcSharedListsClient(
-    private val channelFactory: (ServerEndpoint) -> io.grpc.ManagedChannel = ::nettyChannel,
+    private val channelFactory: (ServerEndpoint) -> ManagedChannel = ::nettyChannel,
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
@@ -353,7 +354,7 @@ class GrpcSharedListsClient(
     }
 
     private inner class ActiveSession(
-        private val channel: io.grpc.ManagedChannel,
+        private val channel: ManagedChannel,
         private val stub: SharedListsGrpcKt.SharedListsCoroutineStub,
         initialState: CanonicalState,
         unconfirmedCommand: EditCommand?,
@@ -765,7 +766,7 @@ private class PinnedTrustManager(
     override fun engineInit(keyStore: KeyStore?) = Unit
 }
 
-private fun nettyChannel(endpoint: ServerEndpoint): io.grpc.ManagedChannel =
+private fun nettyChannel(endpoint: ServerEndpoint): ManagedChannel =
     NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
         .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
         .keepAliveTime(30, TimeUnit.SECONDS)

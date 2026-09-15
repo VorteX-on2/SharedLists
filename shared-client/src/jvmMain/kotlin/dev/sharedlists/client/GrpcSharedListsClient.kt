@@ -26,6 +26,7 @@ import io.grpc.Channel
 import io.grpc.ClientCall
 import io.grpc.ClientInterceptor
 import io.grpc.ForwardingClientCall
+import io.grpc.ManagedChannel
 import io.grpc.Metadata
 import io.grpc.MethodDescriptor
 import io.grpc.Status
@@ -264,6 +265,7 @@ class GrpcSharedListsClient(
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
+    private val channelFactory: (ServerEndpoint) -> ManagedChannel = ::nettyChannel,
 ) : CachedSharedListsClient, ForegroundSharedListsClient, LocalStateResettableClient, ObservableSharedListsClient, SharedListsClient {
     private var activeSession: ActiveSession? = null
     private var cachedState = stateStore.loadCanonicalState()
@@ -273,12 +275,7 @@ class GrpcSharedListsClient(
 
     override suspend fun synchronize(): ClientState {
         activeSession?.close()
-        val channel = NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
-            .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
-            .keepAliveTime(30, TimeUnit.SECONDS)
-            .keepAliveTimeout(10, TimeUnit.SECONDS)
-            .keepAliveWithoutCalls(true)
-            .build()
+        val channel = channelFactory(endpoint)
         try {
             val unauthenticatedStub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
             val challenge = unauthenticatedStub.getChallenge(
@@ -357,7 +354,7 @@ class GrpcSharedListsClient(
     }
 
     private inner class ActiveSession(
-        private val channel: io.grpc.ManagedChannel,
+        private val channel: ManagedChannel,
         private val stub: SharedListsGrpcKt.SharedListsCoroutineStub,
         initialState: CanonicalState,
         unconfirmedCommand: EditCommand?,
@@ -768,6 +765,14 @@ private class PinnedTrustManager(
 
     override fun engineInit(keyStore: KeyStore?) = Unit
 }
+
+private fun nettyChannel(endpoint: ServerEndpoint): ManagedChannel =
+    NettyChannelBuilder.forAddress(endpoint.host, endpoint.port)
+        .sslContext(GrpcSslContexts.forClient().trustManager(PinnedTrustManager(endpoint.certificatePin)).build())
+        .keepAliveTime(30, TimeUnit.SECONDS)
+        .keepAliveTimeout(10, TimeUnit.SECONDS)
+        .keepAliveWithoutCalls(true)
+        .build()
 
 interface DeviceSigner {
     val keyFingerprint: String

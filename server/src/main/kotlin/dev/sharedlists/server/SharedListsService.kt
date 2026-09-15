@@ -15,6 +15,7 @@ import dev.sharedlists.protocol.SyncResponse
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
 import java.sql.SQLException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.channels.Channel
@@ -27,8 +28,11 @@ internal class SharedListsService(
     private val authenticator: ChallengeAuthenticator,
     private val store: SqliteCanonicalStore,
     private val maximumBatchRecords: Int = MAXIMUM_BATCH_RECORDS,
+    private val closeAfterDurableApply: Boolean = false,
     private val onFatalFault: (ServerFaultReason) -> Unit = {},
 ) : SharedListsGrpcKt.SharedListsCoroutineImplBase() {
+    private val closeAfterNextDurableApply = AtomicBoolean(closeAfterDurableApply)
+
     init {
         require(maximumBatchRecords > 0)
     }
@@ -144,6 +148,11 @@ internal class SharedListsService(
                                 requireRequest(lastAcknowledgedRevision == lastDeliveredRevision)
                                 try {
                                     val entry = store.submit(event.request.submitOperation.operation)
+                                    if (closeAfterNextDurableApply.compareAndSet(true, false)) {
+                                        throw Status.UNAVAILABLE
+                                            .withDescription("test-only close after durable apply")
+                                            .asRuntimeException()
+                                    }
                                     send(journal(generation, entry))
                                     if (entry.revision > lastDeliveredRevision) {
                                         lastDeliveredRevision = entry.revision

@@ -14,6 +14,31 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class AndroidFacadeIntegrationTest {
     @Test
+    fun rejectsStandaloneServerWithWrongPinnedIdentity() {
+        val arguments = InstrumentationRegistry.getArguments()
+        val host = arguments.getString("serverHost")
+        val port = arguments.getString("serverPort")
+        assumeTrue(host != null && port != null)
+        val controller = AndroidSynchronizationController(InstrumentationRegistry.getInstrumentation().targetContext)
+        val connected = CountDownLatch(1)
+
+        controller.observe { presentation ->
+            if (presentation.status == "Synchronized") connected.countDown()
+        }
+        assertTrue(
+            controller.configure(
+                requireNotNull(host),
+                requireNotNull(port),
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+        )
+        controller.onForeground()
+
+        assertTrue("Mismatched server identity reached LIVE.", !connected.await(2, TimeUnit.SECONDS))
+        controller.onBackground()
+    }
+
+    @Test
     fun authenticatesAndroidKeystoreIdentityWithStandaloneServer() {
         val arguments = InstrumentationRegistry.getArguments()
         val host = arguments.getString("serverHost")

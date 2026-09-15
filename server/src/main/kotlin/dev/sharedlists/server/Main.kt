@@ -49,6 +49,7 @@ private fun run(args: Array<String>) {
                     SharedListsService(
                         authenticator,
                         store,
+                        closeAfterDurableApply = System.getProperty("sharedlists.test.closeAfterDurableApply") == "true",
                         onFatalFault = { reason ->
                             fatalFault = reason
                             System.err.println("FATAL storage fault: $reason")

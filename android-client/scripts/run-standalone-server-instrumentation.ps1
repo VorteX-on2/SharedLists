@@ -50,6 +50,18 @@ tlsPrivateKeyFile=data/tls/server-key.pem
     $fingerprint = ($fingerprintLine -replace ".*tlsFingerprint=", "").Replace(":", "")
     & $Adb shell am instrument -w -e class dev.sharedlists.android.AndroidFacadeIntegrationTest -e serverHost 10.0.2.2 -e serverPort $Port -e serverFingerprint $fingerprint "dev.sharedlists.android.test/androidx.test.runner.AndroidJUnitRunner"
     if ($LASTEXITCODE -ne 0) { throw "Android production facade integration failed." }
+    Stop-Process -Id $serverProcess.Id
+    $serverProcess.WaitForExit()
+    $serverProcess = Start-Process java -ArgumentList "-Dsharedlists.test.closeAfterDurableApply=true", "-cp", $classpath, "dev.sharedlists.server.MainKt", "--config", "$fixture\sharedlists.properties" -WorkingDirectory $fixture -RedirectStandardOutput "$fixture\lost-ack-server.log" -RedirectStandardError "$fixture\lost-ack-server.err" -PassThru
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        Start-Sleep -Milliseconds 100
+        $serverOutput = if (Test-Path "$fixture\lost-ack-server.log") { Get-Content "$fixture\lost-ack-server.log" -Raw } else { "" }
+        $ready = $serverOutput -and $serverOutput.Contains("STARTED serviceUri=https://10.0.2.2:$Port")
+    } while (!$ready -and [DateTime]::UtcNow -lt $deadline)
+    if (!$ready) { throw "Lost-ack standalone server did not become ready: $(Get-Content "$fixture\lost-ack-server.err" -Raw)" }
+    & $Adb shell am instrument -w -e class "dev.sharedlists.android.AndroidFacadeIntegrationTest#reconcilesLostAcknowledgementWithTheSameDurableOperation" -e expectLostAcknowledgement true -e serverHost 10.0.2.2 -e serverPort $Port -e serverFingerprint $fingerprint "dev.sharedlists.android.test/androidx.test.runner.AndroidJUnitRunner"
+    if ($LASTEXITCODE -ne 0) { throw "Android lost-acknowledgement integration failed." }
 
     Stop-Process -Id $serverProcess.Id
     $serverProcess.WaitForExit()

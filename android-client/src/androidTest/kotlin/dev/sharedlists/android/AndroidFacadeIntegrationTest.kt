@@ -3,9 +3,34 @@ package dev.sharedlists.android
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.sharedlists.client.EnrollmentState
+import dev.sharedlists.client.ServerEndpoint
+import dev.sharedlists.client.StreamChallenge
+import dev.sharedlists.client.StreamJwt
+import dev.sharedlists.protocol.AppliedThrough
+import dev.sharedlists.protocol.ChallengeRequest
+import dev.sharedlists.protocol.OpenSync
+import dev.sharedlists.protocol.SharedListsGrpcKt
+import dev.sharedlists.protocol.SyncRequest
+import io.grpc.CallOptions
+import io.grpc.Channel
+import io.grpc.ClientCall
+import io.grpc.ClientInterceptor
+import io.grpc.ForwardingClientCall
+import io.grpc.Metadata
+import io.grpc.MethodDescriptor
+import io.grpc.Status
+import io.grpc.StatusException
+import io.grpc.StatusRuntimeException
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -13,6 +38,36 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AndroidFacadeIntegrationTest {
+    @Test
+    fun rejectsConsumedChallengeTokenFromAndroidKeystoreSigner() = runBlocking {
+        val configuration = fixtureConfiguration()
+        val signer = requireNotNull(AndroidKeystoreDeviceEnrollment(InstrumentationRegistry.getInstrumentation().targetContext).current())
+        val channel = AndroidPinnedChannelFactory().create(ServerEndpoint(configuration.host, configuration.port.toInt(), configuration.fingerprint))
+        try {
+            val stub = SharedListsGrpcKt.SharedListsCoroutineStub(channel)
+            val challenge = stub.getChallenge(ChallengeRequest.newBuilder().setKeyFingerprint(signer.keyFingerprint).build())
+            val token = StreamJwt.create(signer, StreamChallenge(challenge.audience, Instant.ofEpochSecond(challenge.expiresAtEpochSeconds), Instant.ofEpochSecond(challenge.issuedAtEpochSeconds), challenge.nonce.toByteArray()))
+            val requests = flowOf(
+                SyncRequest.newBuilder().setOpen(OpenSync.newBuilder().setSupportsBoundedTransfer(true)).build(),
+                SyncRequest.newBuilder().setAppliedThrough(AppliedThrough.newBuilder().setRevision(0)).build(),
+            )
+            withTimeout(REPLAY_TIMEOUT_MILLIS) {
+                stub.withInterceptors(BearerTokenInterceptor(token)).sync(requests).first { it.hasLive() }
+            }
+            try {
+                withTimeout(REPLAY_TIMEOUT_MILLIS) {
+                    stub.withInterceptors(BearerTokenInterceptor(token)).sync(requests).firstOrNull()
+                }
+                throw AssertionError("A consumed challenge token opened a second synchronization stream.")
+            } catch (exception: StatusException) {
+                assertEquals(Status.Code.UNAUTHENTICATED, exception.status.code)
+            } catch (exception: StatusRuntimeException) {
+                assertEquals(Status.Code.UNAUTHENTICATED, exception.status.code)
+            }
+        } finally {
+            channel.shutdownNow()
+        }
+    }
     @Test
     fun appliesEditsAndRestoresCachedCanonicalStateWithProductionFacade() {
         val configuration = fixtureConfiguration()
@@ -67,12 +122,30 @@ class AndroidFacadeIntegrationTest {
         assertTrue(controller.configure(configuration.host, configuration.port, configuration.fingerprint))
         controller.onForeground()
         awaitPresentation(controller, "Android facade did not reach LIVE state.") { it.editingEnabled }
-        controller.onNetworkAvailable(false)
-        awaitPresentation(controller, "Network loss did not immediately gate editing.") {
+        awaitPresentation(controller, "Network loss did not immediately gate editing.", action = {
+            controller.onNetworkAvailable(false)
+        }) {
             !it.editingEnabled && it.status == "Waiting for a network connection."
         }
         controller.onNetworkAvailable(true)
         awaitPresentation(controller, "Android facade did not reconnect after network recovery.") { it.editingEnabled }
+        controller.onBackground()
+    }
+
+    @Test
+    fun reconcilesLostAcknowledgementWithTheSameDurableOperation() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("expectLostAcknowledgement") == "true")
+        val configuration = fixtureConfiguration()
+        val controller = AndroidSynchronizationController(InstrumentationRegistry.getInstrumentation().targetContext)
+        val listName = "Lost acknowledgement ${UUID.randomUUID()}"
+
+        assertTrue(controller.configure(configuration.host, configuration.port, configuration.fingerprint))
+        controller.onForeground()
+        awaitPresentation(controller, "Android facade did not reach LIVE state.") { it.editingEnabled }
+        controller.createList(listName)
+        awaitPresentation(controller, "The durable operation was not reconciled after the lost acknowledgement.") { presentation ->
+            presentation.editingEnabled && presentation.canonicalState.lists.count { it.name == listName } == 1
+        }
         controller.onBackground()
     }
 
@@ -148,8 +221,9 @@ class AndroidFacadeIntegrationTest {
         controller.onForeground()
         awaitPresentation(controller, "Android facade did not reach LIVE state.") { it.editingEnabled }
         controller.onBackground()
-        controller.createList("Must not be submitted while backgrounded")
-        awaitPresentation(controller, "Background state did not reject an edit.") {
+        awaitPresentation(controller, "Background state did not reject an edit.", action = {
+            controller.createList("Must not be submitted while backgrounded")
+        }) {
             !it.editingEnabled && it.status == "Editing is available only while synchronized."
         }
         controller.onForeground()
@@ -160,12 +234,14 @@ class AndroidFacadeIntegrationTest {
     private fun awaitPresentation(
         controller: AndroidSynchronizationController,
         failureMessage: String,
+        action: (() -> Unit)? = null,
         predicate: (AndroidClientPresentation) -> Boolean,
     ) {
         val latch = CountDownLatch(1)
         controller.observe { presentation ->
             if (predicate(presentation)) latch.countDown()
         }
+        action?.invoke()
         assertTrue(failureMessage, latch.await(20, TimeUnit.SECONDS))
     }
 
@@ -183,5 +259,29 @@ class AndroidFacadeIntegrationTest {
         val port: String,
         val fingerprint: String,
     )
+
+    private companion object {
+        const val REPLAY_TIMEOUT_MILLIS = 5_000L
+    }
+
+    private class BearerTokenInterceptor(
+        private val token: String,
+    ) : ClientInterceptor {
+        override fun <RequestT : Any, ResponseT : Any> interceptCall(
+            method: MethodDescriptor<RequestT, ResponseT>,
+            callOptions: CallOptions,
+            next: Channel,
+        ): ClientCall<RequestT, ResponseT> =
+            object : ForwardingClientCall.SimpleForwardingClientCall<RequestT, ResponseT>(next.newCall(method, callOptions)) {
+                override fun start(responseListener: Listener<ResponseT>, headers: Metadata) {
+                    headers.put(AUTHORIZATION, "Bearer $token")
+                    super.start(responseListener, headers)
+                }
+            }
+
+        private companion object {
+            val AUTHORIZATION: Metadata.Key<String> = Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER)
+        }
+    }
 
 }

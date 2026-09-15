@@ -28,6 +28,7 @@ private class AndroidCertificatePinTrustManager(
 
     override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {
         val certificate = requireNotNull(chain.firstOrNull()) { "Server did not provide a TLS certificate." }
+        certificate.checkValidity()
         val fingerprint = MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
             .joinToString("") { byte -> "%02X".format(byte) }
         require(fingerprint.equals(certificatePin.replace(":", ""), ignoreCase = true)) {

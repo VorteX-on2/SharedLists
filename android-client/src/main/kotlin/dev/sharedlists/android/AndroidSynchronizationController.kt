@@ -207,7 +207,12 @@ class AndroidSynchronizationController(
     }
 
     fun resetLocalData() {
-        (client as? LocalStateResettableClient)?.resetLocalState()
+        cancelClient()
+        if (!clearPersistedStates()) {
+            presentation = presentation.copy(editingEnabled = false, status = "Unable to reset local synchronization data.")
+            publish()
+            return
+        }
         presentation = presentation.copy(canonicalState = CanonicalState(), editingEnabled = false, status = "Local synchronization data reset.")
         publish()
         startIfEligible()
@@ -236,6 +241,9 @@ class AndroidSynchronizationController(
         (client as? ForegroundSharedListsClient)?.cancelForegroundSynchronization()
         client = null
     }
+
+    private fun clearPersistedStates(): Boolean =
+        stateDirectory.listFiles()?.all(File::delete) ?: true
 
     private fun startIfEligible() {
         if (!foreground || !networkAvailable) return

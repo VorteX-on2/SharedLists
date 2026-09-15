@@ -100,6 +100,9 @@ class SharedListsActivity : Activity() {
             }
             if (presentation.exportRequired) addButton("Export public key", ::sharePublicKey)
             if (presentation.enrollment == EnrollmentState.ENROLLED) {
+                presentation.configuration?.let { configuration ->
+                    addButton("Change server configuration") { showConfigurationDialog(configuration) }
+                }
                 addButton(if (hideMarkedItems) "Show marked items" else "Hide marked items") {
                     hideMarkedItems = !hideMarkedItems
                     render(presentation)
@@ -128,6 +131,24 @@ class SharedListsActivity : Activity() {
                 status.text = "Enter a server address, port, and SHA-256 fingerprint."
             }
         }
+    }
+
+    private fun showConfigurationDialog(configuration: AndroidServerConfiguration) {
+        val host = EditText(this).apply { setText(configuration.host); hint = "Server IP address" }
+        val port = EditText(this).apply { setText(configuration.port.toString()); hint = "Port"; inputType = InputType.TYPE_CLASS_NUMBER }
+        val fingerprint = EditText(this).apply { setText(configuration.certificateFingerprint); hint = "SHA-256 server fingerprint" }
+        val fields = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(host)
+            addView(port)
+            addView(fingerprint)
+        }
+        AlertDialog.Builder(this).setTitle("Server configuration").setView(fields).setNegativeButton("Cancel", null)
+            .setPositiveButton("Save") { _, _ ->
+                if (!controller.configure(host.text.toString(), port.text.toString(), fingerprint.text.toString())) {
+                    status.text = "Enter a server address, port, and SHA-256 fingerprint."
+                }
+            }.show()
     }
 
     private fun addLists(lists: List<SharedList>, editingEnabled: Boolean) {
@@ -175,7 +196,10 @@ class SharedListsActivity : Activity() {
                     addView(Button(this@SharedListsActivity).apply {
                         text = if (item.marked) "✓ ${item.text}" else item.text
                         contentDescription = "Edit ${item.text}"
-                        setOnClickListener { prompt("Edit item", item.text) { controller.editItemText(selected.id, item.id, it) } }
+                        isEnabled = editingEnabled
+                        setOnClickListener {
+                            if (editingEnabled) prompt("Edit item", item.text) { controller.editItemText(selected.id, item.id, it) }
+                        }
                     })
                     if (editingEnabled) {
                         addView(LinearLayout(this@SharedListsActivity).apply {
@@ -214,7 +238,10 @@ class SharedListsActivity : Activity() {
             container.addView(Button(this).apply {
                 text = if (item.marked) "✓ ${item.text}" else item.text
                 contentDescription = "Edit ${item.text}"
-                setOnClickListener { prompt("Edit item", item.text) { controller.editItemText(list.id, item.id, it) } }
+                isEnabled = editingEnabled
+                setOnClickListener {
+                    if (editingEnabled) prompt("Edit item", item.text) { controller.editItemText(list.id, item.id, it) }
+                }
             })
             if (editingEnabled) {
                 container.addView(LinearLayout(this).apply {

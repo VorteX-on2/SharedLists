@@ -262,10 +262,10 @@ private object OperationCodec {
 }
 
 class GrpcSharedListsClient(
-    private val channelFactory: (ServerEndpoint) -> ManagedChannel = ::nettyChannel,
     private val deviceSigner: DeviceSigner,
     private val endpoint: ServerEndpoint,
     private val stateStore: ClientStateStore,
+    private val channelFactory: (ServerEndpoint) -> ManagedChannel = ::nettyChannel,
 ) : CachedSharedListsClient, ForegroundSharedListsClient, LocalStateResettableClient, ObservableSharedListsClient, SharedListsClient {
     private var activeSession: ActiveSession? = null
     private var cachedState = stateStore.loadCanonicalState()

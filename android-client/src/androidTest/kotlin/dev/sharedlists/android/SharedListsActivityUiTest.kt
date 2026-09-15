@@ -52,6 +52,7 @@ class SharedListsActivityUiTest {
             assertFalse(device.hasObject(By.desc("Create shared list")))
             device.findObject(By.desc("Groceries")).click()
             assertTrue(device.wait(Until.hasObject(By.desc("Edit Milk")), TIMEOUT_MILLIS))
+            assertFalse(device.findObject(By.desc("Edit Milk")).isEnabled)
             assertFalse(device.hasObject(By.desc("Add item")))
             assertFalse(device.hasObject(By.desc("Delete list")))
         } finally {
